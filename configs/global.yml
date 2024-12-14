@@ -1,0 +1,26 @@
+run_name: debug-global-splatam
+
+keyframe_every: 1
+map_every: 1
+isotropic: true
+
+# img_height: 440
+# img_width: 440
+
+tracking:
+  use_gt_poses: false 
+  # with_droid: true
+
+mapping:
+  add_rand_gaussians: false
+  visualize_frame: 8
+
+policy:
+  name: pose-comp # compare pose 
+  planning_queue_size: 150
+  
+#   with_droid: true
+
+explore:
+  sample_view_num: 10
+#   grid_candidates: 2

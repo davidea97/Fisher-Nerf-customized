@@ -1,0 +1,94 @@
+
+workdir: &workdir experiments/GaussianSLAM
+run_name: &run_name UPEN_rrt_explore
+
+policy: 
+  name: UPEN
+  with_rrt_planning: true
+  fbe: false
+  exploration: true
+  save_nav_images: true
+
+num_frames: &total_frames 2000
+checkpoint_interval: 1000
+forward_step_size: 0.05
+turn_angle: 5.
+
+report_global_progress_every: 10
+report_iter_progress: true
+
+save_checkpoints: true
+scene_radius_depth_ratio: 3
+use_wandb: false 
+img_height: 800
+img_width: 800
+downsample_pcd: 4
+
+# mapping parameters
+mapping:
+  add_new_gaussians: true
+  add_rand_gaussians: false
+  densify_dict:
+    final_removal_opacity_threshold: 0.005
+    removal_opacity_threshold: 0.005
+    densify_every: 100
+    grad_thresh: 0.0002
+    num_to_split_into: 2
+    remove_big_after: 3000
+    reset_opacities_every: 3000
+    start_after: 500
+    stop_after: 5000
+    depth_error_ratio: 10
+    add_random_gaussians: false
+  ignore_outlier_depth_loss: false
+  loss_weights:
+    depth: 1.0
+    im: 0.5
+  lrs:
+    cam_trans: 0.0
+    cam_unnorm_rots: 0.0
+    log_scales: 0.01
+    logit_opacities: 0.05
+    means3D: 0.001
+    rgb_colors: 0.0025
+    unnorm_rotations: 0.001
+  num_iters: 60
+  prune_gaussians: true
+  pruning_dict:
+    # Remove gaussians with opacity below this threshold
+    final_removal_opacity_threshold: 0.0001
+    removal_opacity_threshold: 0.0001
+    prune_every: 40
+    remove_big_after: 100
+    reset_opacities: false
+    reset_opacities_every: 500
+    start_after: 0
+    stop_after: *total_frames
+  sil_thres: 0.5
+  use_gaussian_splatting_densification: false
+  use_l1: true
+  use_sil_for_loss: false
+
+# tracking parameters
+tracking:
+  depth_loss_thres: 20000
+  forward_prop: true
+  ignore_outlier_depth_loss: false
+  loss_weights:
+    depth: 1.0
+    im: 0.5
+  lrs:
+    cam_trans: 0.002
+    cam_unnorm_rots: 0.0004
+    log_scales: 0.0
+    logit_opacities: 0.0
+    means3D: 0.0
+    rgb_colors: 0.0
+    unnorm_rotations: 0.0
+  num_iters: 40
+  sil_thres: 0.89
+  use_depth_loss_thres: true
+  use_gt_poses: true
+  use_l1: true
+  use_sil_for_loss: true
+  visualize_tracking_loss: true

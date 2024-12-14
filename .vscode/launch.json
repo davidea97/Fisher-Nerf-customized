@@ -1,0 +1,112 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python: Oracle",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--name", "test_pointnav_exp",
+                "--ensemble_dir", "ckpt/",
+                "--slam_config", "configs/mp3d_gaussian_placement_config.yaml",
+                "--root_path", "/home/wen/Projects/mp3d/",
+                "--log_dir", "logs/", 
+                "--scenes_list", "2azQ1b91cZZ", 
+                "--gpu_capacity", "1", 
+                "--with_rrt_planning", 
+                "--test_set", "v1"
+            ]   
+        },
+        {
+            "name": "Python: global_local_plan",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--name", "test_pointnav_exp",
+                "--ensemble_dir", "ckpt/",
+                "--slam_config", "configs/mp3d_gaussian_FR_frontier.yaml",
+                "--root_path", "/root/mp3d/",
+                "--log_dir", "logs/", 
+                "--scenes_list", "2azQ1b91cZZ", 
+                "--gpu_capacity", "1", 
+                "--test_set", "v1"
+            ]   
+        },
+        {
+            "name": "Python: UPEN_rrt",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--name", "test_pointnav_exp",
+                "--ensemble_dir", "ckpt/",
+                "--slam_config", "configs/mp3d_gaussian_UPEN_fbe.yaml",
+                "--root_path", "/home/wen/Projects/mp3d/",
+                "--log_dir", "logs/", 
+                "--scenes_list", "2azQ1b91cZZ", 
+                "--gpu_capacity", "1", 
+                "--test_set", "v1"
+            ]   
+        },
+        {
+            "name": "Python: iSDF",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--name", "test_pointnav_exp",
+                "--ensemble_dir", "ckpt/",
+                "--slam_config", "configs/mp3d_gaussian_iSDF.yaml",
+                "--root_path", "/home/wen/Projects/mp3d/",
+                "--log_dir", "logs/", 
+                "--scenes_list", "2azQ1b91cZZ", 
+                "--gpu_capacity", "1", 
+                "--test_set", "v1"
+            ]   
+        },
+        {
+            "name": "Python: PSNR Testing",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--name", "test_pointnav_exp",
+                "--ensemble_dir", "ckpt/",
+                "--slam_config", "configs/mp3d_gaussian_prune_ratio_config.yaml",
+                "--root_path", "/home/wen/Projects/mp3d/",
+                "--log_dir", "logs/", 
+                "--scenes_list", "2azQ1b91cZZ", 
+                "--gpu_capacity", "1", 
+                "--with_rrt_planning", 
+                "--test_set", "v1"
+            ]   
+        },
+        {
+            "name": "Python: o3d viewer",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "viz/o3d_viewer.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--data_dir", "experiments/Habitat/ratio10_oracle_range06_circle_cluster_filter",
+            ]   
+        }
+    ]
+}

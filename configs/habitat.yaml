@@ -1,0 +1,18 @@
+inherit_from: "configs/base_config.yaml"
+
+Dataset:
+  # dataset_path: "datasets/tum/rgbd_dataset_freiburg1_desk"
+  Calibration:
+    fx: 400
+    fy: 400
+    cx: 400
+    cy: 400
+    k1: 0.
+    k2: 0.
+    p1: 0.
+    p2: 0.
+    k3: 0.
+    distorted: False
+    width: 800
+    height: 800
+    depth_scale: 1.

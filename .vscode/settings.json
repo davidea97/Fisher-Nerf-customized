@@ -1,0 +1,26 @@
+{
+    "files.exclude": {
+        "**/eigen/**": true,
+        "**/glm/**": true,
+        "**/wandb/": true,
+        "diff-gaussian-rasterization-w-depth/third_party/": true,
+        "DROID-SLAM/": true,
+        "experiments/": true,
+        "logs": true
+    },
+    "files.watcherExclude": {
+        "diff-gaussian-rasterization-w-depth/third_party/": true,
+        "experiments/": true
+    },
+    "python.analysis.typeCheckingMode": "off",
+    "python.analysis.autoImportCompletions": false,
+    "python.languageServer": "Default",
+    "python.analysis.exclude": [
+        "experiments/",
+        "**/glm/",
+        "DROID-SLAM/",
+        "wandb",
+        "experiments/",
+        "**/eigen"
+    ]
+}
