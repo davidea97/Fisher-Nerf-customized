@@ -77,5 +77,7 @@ bash scripts/gibson.sh configs/mp3d_gaussian_FR_frontier.yaml
 bash scripts/gibson.sh configs/mp3d_gaussian_UPEN_fbe.yaml
 
 # HM3D results
-bash scripts/gibson.sh configs/mp3d_gaussian_FR_eccv.yaml
+bash scripts/mp3d.sh configs/mp3d_gaussian_FR_eccv.yaml
 ```
+
+Pretrained Gaussians can be found [here](https://drive.google.com/drive/folders/15aTH4025cbjs1Y81g1PjKbdSXOixgboV?usp=sharing).
