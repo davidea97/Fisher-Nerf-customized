@@ -4,3 +4,5 @@ wandb/
 *.so
 experiment/
 experiments/
+logs/
+output_images_DINO/

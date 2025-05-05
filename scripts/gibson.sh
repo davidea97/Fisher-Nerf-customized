@@ -1,6 +1,6 @@
 
 CONFIG=$1
-DATADIR=/data/habitat-api/
+DATADIR=/data/habitat-api
 
 SCENES=("Ribera" )
 # "Cantwell" "Eudora" "Pablo" "Ribera" "Greigsville"

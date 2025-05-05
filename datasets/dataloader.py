@@ -15,7 +15,7 @@ import os
 import gzip
 import json
 import pickle
-
+from SimObjects import SimObject
 
 class HabitatDataOffline(Dataset):
 
@@ -75,10 +75,10 @@ class HabitatDataOffline(Dataset):
 ## Loads the simulator and episodes separately to enable per_scene collection of data
 class HabitatDataScene(Dataset):
 
-    def __init__(self, options, config_file, scene_id, slam_config, existing_episode_list=[]):
+    def __init__(self, options, config_file, scene_id, slam_config, existing_episode_list=[], dynamic=False):
         self.scene_id = scene_id
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+        print("Config file:", config_file)
         cfg = habitat.get_config(config_file)
         OmegaConf.set_readonly(cfg, False)
         if options.dataset_type == "mp3d":
@@ -88,6 +88,16 @@ class HabitatDataScene(Dataset):
             cfg.habitat.simulator.scene = options.root_path + "/data/scene_datasets/" + options.scenes_dir + scene_id + '.glb'
         elif options.dataset_type == "replica":
             cfg.habitat.simulator.scene = os.path.join(options.root_path, "data/scene_datasets/",  options.scenes_dir,  scene_id, 'habitat/mesh_semantic.ply')
+        elif options.dataset_type == "hm3d":
+            scene_name = scene_id.split('-')[1] if '-' in scene_id else scene_id
+            cfg.habitat.simulator.scene = os.path.join(options.root_path, "hm3d-0.2/hm3d/", options.split, scene_id, "{}.basis.glb".format(scene_name)) # scene_dataset_path
+            cfg.habitat.simulator.scene_dataset = os.path.join(
+                options.root_path,
+                "hm3d-0.2/hm3d/hm3d_annotated_basis.scene_dataset_config.json"
+            )
+                
+        elif options.dataset_type == "habitat_test_scenes":
+            cfg.habitat.simulator.scene = os.path.join(options.root_path, "habitat_test_scenes", "{}.glb".format(scene_id)) # scene_dataset_path
         
         print("Scene:", cfg.habitat.simulator.scene)
         cfg.habitat.simulator.turn_angle = int(options.turn_angle)
@@ -101,11 +111,51 @@ class HabitatDataScene(Dataset):
         cfg.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor.width = slam_config.img_width  
         cfg.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor.height  = slam_config.img_height  
         cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.width = slam_config.img_width  
-        cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.height = slam_config.img_height  
+        cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.height = slam_config.img_height 
+        # Initialize also the semantic sensor
+        cfg.habitat.simulator.agents.main_agent.sim_sensors.semantic_sensor.width = slam_config.img_width
+        cfg.habitat.simulator.agents.main_agent.sim_sensors.semantic_sensor.height = slam_config.img_height 
         OmegaConf.set_readonly(cfg, True)
-
+        print("Simulator config:", cfg.habitat.simulator)
         self.sim = habitat.Env(config=cfg)
         
+
+        # if dynamic:
+        #     obj_templates_mgr = self.sim._sim.get_object_template_manager()
+        #     rigid_obj_mgr = self.sim._sim.get_rigid_object_manager()
+        #     template_file_path = os.path.join(options.root_path, "habitat_example_objects_0.2/car")
+        #     scale_factor = 0.1
+        #     print("Loading object template from:", template_file_path)
+        #     template_id = obj_templates_mgr.load_configs(
+        #         str(template_file_path))[0]
+        #     obj_template = obj_templates_mgr.get_template_by_id(template_id)
+        #     obj_template.scale = [scale_factor, scale_factor, scale_factor]
+
+        #     obj_templates_mgr.register_template(obj_template)
+        #     # create sphere
+        #     new_obj = rigid_obj_mgr.add_object_by_template_id(template_id)
+        #     # self.default_agent = self.sim._sim.get_agent(0)
+        #     # self.rigid_obj.motion_type = habitat_sim.physics.MotionType.DYNAMIC   # It moves the object from the initial position (it cannot fly because the dynamic is enabled and it falls down)
+        #     agent_node = self.sim._sim.agents[0].scene_node
+        #     # Place object 1.0 meter in front of the camera
+        #     camera_forward_offset = [0.0, 0.0, -1.0]  # -Z is forward in Habitat-Sim
+        #     object_position = agent_node.transformation.transform_point(camera_forward_offset)
+        #     new_obj.translation = object_position
+
+        #     move_object = True
+        #     show_object_axes = False
+        #     sim_obj = SimObject(new_obj, moving=move_object, show_object_axes=show_object_axes)
+        #     if move_object:
+        #         linear_velocity = [0.0, 0.0, 0.3]
+        #         angular_velocity = [0.0, -1.0, 0.0]
+        #         sim_obj.enable_kinematic_velocity(linear_velocity, angular_velocity)
+            
+        #     position = new_obj.translation
+        #     rotation = new_obj.rotation  # This is a quaternion (x, y, z, w)
+
+        #     print("Object position (x, y, z):", position)
+        #     print("Object rotation (quaternion x, y, z, w):", rotation)
+            
         # Load pose noise models from Neural SLAM
         if options.noisy_pose:
             self.sensor_noise_fwd = \
@@ -119,10 +169,16 @@ class HabitatDataScene(Dataset):
         self.sim.seed(seed)
 
         ## Load episodes of scene_id
-        
+        print("Root path:", options.root_path)
         # Pointnav val episodes are all in a single file
         if options.dataset_type == "mp3d":
             ep_file_path = os.path.join(options.root_path, "data/datasets/pointnav/mp3d/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
+        elif options.dataset_type == "hm3d":
+            ep_file_path = os.path.join("../data/datasets/pointnav/hm3d/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
+            print("Episode file path:", ep_file_path)
+        elif options.dataset_type == "habitat_test_scenes":
+            ep_file_path = os.path.join("../data/datasets/pointnav/habitat_test_scenes/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
+            print("Episode file path:", ep_file_path)
         elif options.dataset_type == "gibson":
             ep_file_path = os.path.join(options.root_path, "data/datasets/pointnav/gibson/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
         elif options.dataset_type == "replica":
@@ -173,6 +229,7 @@ class HabitatDataScene(Dataset):
 
         ## Dataloader params
         self.hfov = float(cfg.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor.hfov) * np.pi / 180.
+
         self.cfg_norm_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.normalize_depth
         self.max_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.max_depth
         self.min_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.min_depth
@@ -288,7 +345,7 @@ class HabitatDataScene(Dataset):
         sim_obs = self.sim.get_sensor_observations()
         observations = self.sim._sensor_suite.get_observations(sim_obs)
 
-
+        print("Observations:", observations.keys())
         for i in range(episode_extend):
             img = observations['rgb'][:,:,:3]
             depth_obsv = observations['depth'].permute(2,0,1).unsqueeze(0)

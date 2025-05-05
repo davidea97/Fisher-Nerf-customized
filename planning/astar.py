@@ -123,7 +123,7 @@ class AstarPlanner:
         cam_pos_x = int((cam_x - self.map_center[0]) / self.cell_size + self.grid_dim[0] // 2)
         cam_pos_z = int((cam_z - self.map_center[1]) / self.cell_size + self.grid_dim[1] // 2)
         self.cam_pos = np.array([cam_pos_z, cam_pos_x])
-        self.occ_map[2, cam_pos_z-1:cam_pos_z+2, cam_pos_x-1:cam_pos_x+2] = 1e3 
+        self.occ_map[2, cam_pos_z-1:cam_pos_z+2, cam_pos_x-1:cam_pos_x+2] = 1e3 # It is setting an higher value on the free map in the agent position
         
         # convert depth to torch Tensor
         if isinstance(depth, np.ndarray):
@@ -172,6 +172,7 @@ class AstarPlanner:
 
         # all particles are treated as free
         occ_lbl = torch.ones((free_particles.shape[1], 1), device=free_particles.device).long() * 2
+        # Remove floor and ceiling
         valid_sgn = torch.bitwise_and(free_particles[1] >= self.height_lower, free_particles[1] <= self.height_upper)
 
         # (N, 3) - (x, y, label)
@@ -186,6 +187,7 @@ class AstarPlanner:
         grid.fill_(0.)
 
         depth_pts = c2w @ depth_pts
+        # Assign value 1 = OCCUPIED to depth points
         occ_lbl = torch.ones((depth_pts.shape[1], 1), device=depth_pts.device).long()
         valid_sgn = torch.bitwise_and(depth_pts[1] >= self.height_lower, depth_pts[1] <= self.height_upper)
 
@@ -543,7 +545,7 @@ class AstarPlanner:
             visualize:  
         """
         # build frontiers
-
+        print("GLOBAL PLANNING")
         if self.frontier_select_method == "vlm":
             candidate_pos, free_space = self.build_vlm_frontiers(slam, gaussian_points)
         else:
@@ -592,7 +594,8 @@ class AstarPlanner:
                     eroded_free_space = torch.from_numpy(eroded_free_space).cuda()
                     free_pose = eroded_free_space[candidate_xy[:, 1], candidate_xy[:, 0]]
                     candidate_pose = candidate_pose[free_pose]
-
+        print("Candidate pose: ", len(candidate_pose))
+        print("Candidate pose: ", candidate_pose)
         # add uniformly sampled poses
         if not use_frontier:
             # random sampling     
@@ -613,10 +616,110 @@ class AstarPlanner:
         #     candidate_pose = torch.cat([candidate_pose, self.previous_candidates], dim=0)
 
         if pose_evaluation_fn is None:
+            print("Pose eval: ", self.pose_eval)
             scores, poses = self.pose_eval(candidate_pose)
+            print("Scores : ", scores)
+            print("Poses : ", poses)
         else:
             scores, poses = pose_evaluation_fn(candidate_pose, random_gaussian_params)
+        #visualize
+        if visualize:
+            occ_map = self.occ_map.argmax(0) == 1
+            binarymap = occ_map.cpu().numpy().astype(np.uint8)
+            
+            # dilate binary map
+            kernel = np.ones((3, 3), np.uint8)  
+            binarymap = cv2.dilate(binarymap, kernel)
 
+            #to RGB
+            vis_map = np.zeros((binarymap.shape[0],binarymap.shape[1],3), np.uint8)
+            vis_map[:,:,0][binarymap!=0] = 255
+            vis_map[:,:,1][binarymap!=0] = 255
+            vis_map[:,:,2][binarymap!=0] = 255
+
+            #frontiers
+            if self.frontier.sum() != 0:
+                frontier = self.frontier.copy()
+                frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
+                vis_map[:,:,0][frontier!=0] = 0
+                vis_map[:,:,1][frontier!=0] = 255
+                vis_map[:,:,2][frontier!=0] = 0
+
+            # candidate poses
+            normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
+            for score, pose in zip(normalized_scores, poses):
+                heatcolor = heatmap(score.item())[:3]
+                pt = self.convert_to_map([pose[0,3],pose[2,3]])
+                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+                # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
+
+            # agent position
+            pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
+            vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+
+            plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+            plt.close()
+
+        # and we only select the TOP 50 points
+        topk = 20
+        sort_index = torch.argsort(scores, descending=True)
+        poses = poses[sort_index[:topk]]
+        scores = scores[sort_index[:topk]]
+
+        # log the topk candidates
+        self.previous_candidates = poses
+
+        return poses, scores, random_gaussian_params
+
+    def global_planning_frontier(self, expansion=1, visualize=True, 
+                        agent_pose=None, last_goal = None, slam=None):
+        """ 
+        Global Planning for next target goal 
+        
+        Args:
+            expansion (int): expansion factor (increase when no best path is found)
+            visualize:  
+        """
+        # build frontiers
+        print(">> Generate possible candidate pose")
+     
+        candidate_pos, free_space = self.build_frontiers(None)
+        use_frontier = candidate_pos is not None
+    
+        # generate random gaussians
+        random_gaussian_params = None
+
+        # extract goals
+        candidate_pose = []
+        if candidate_pos is not None:
+            # centering
+            if isinstance(candidate_pos, np.ndarray):
+                candidate_pos = torch.from_numpy(candidate_pos).cuda()
+            if self.centering:
+                candidate_pos = torch.mean(candidate_pos, dim=0, keepdim=True)
+
+            # sample poses
+            while len(candidate_pose) == 0:
+                candidate_pose = self.generate_candidate(candidate_pos, expansion)
+                # expand the radius
+                expansion *= 1.5
+            
+                # select goals in freespace
+                eroded_free_space = cv2.erode(free_space.astype(np.uint8), np.ones((10, 10), np.uint8))
+                if eroded_free_space.sum() > 40 :
+                    # when no frontiers 
+                    candidate_xy = candidate_pose[:, [0, 2], 3]
+                    candidate_xy[:, 0] = (candidate_xy[:, 0] - self.map_center[0]) / self.cell_size + self.grid_dim[0] // 2
+                    candidate_xy[:, 1] = (candidate_xy[:, 1] - self.map_center[1]) / self.cell_size + self.grid_dim[1] // 2
+                    candidate_xy = candidate_xy.long()
+
+                    eroded_free_space = torch.from_numpy(eroded_free_space).cuda()
+                    free_pose = eroded_free_space[candidate_xy[:, 1], candidate_xy[:, 0]]
+                    candidate_pose = candidate_pose[free_pose]
+        print("Candidate pose: ", len(candidate_pose))
+        
+        scores, poses = self.pose_eval(candidate_pose)
+        
         #visualize
         if visualize:
             occ_map = self.occ_map.argmax(0) == 1
@@ -948,3 +1051,6 @@ class AstarPlanner:
         frontier_pts3d[:, [0, 2]] = frontier_pts
         frontier_pts3d[:, 1] = self.cam_height
         return frontier_pts3d
+
+    def get_map(self):
+        return self.occ_map

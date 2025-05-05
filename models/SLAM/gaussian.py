@@ -205,6 +205,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
                         use_l1, use_sil_for_loss, ignore_outlier_depth_loss, tracking)
 
     # Visualize the Diff Images
+    
     if tracking and visualize_tracking_loss and (tracking_iteration + 1) % 10 == 0:
         fig, ax = plt.subplots(2, 4, figsize=(12, 6))
         weighted_render_im = im * color_mask
@@ -249,6 +250,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
         ## Save Tracking Loss Viz
         save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
+        print("Save plot dir: ", save_plot_dir)
         os.makedirs(save_plot_dir, exist_ok=True)
         plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % tracking_iteration), bbox_inches='tight')
         plt.close()
@@ -289,6 +291,7 @@ def add_new_gaussians(config, params, variables, curr_data, sil_thres,
                     add_rand_gaussians = True, downsample_pcd = 1):
     """ Add new gaussians based """
     # Silhouette Rendering
+    print("PARAMS")
     transformed_pts = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
                                                                  transformed_pts)
@@ -583,9 +586,12 @@ class GaussianSLAM:
             do_continue_slam = False
             num_iters_tracking = self.config['tracking']['num_iters']
             progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+            print("Evaluation dir: ", self.eval_dir)
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
+                print(f"Tracking Iteration: {iteration}")
+                
                 loss, variables, losses = get_loss(self.params, curr_data, self.variables, iter_time_idx, self.config['tracking']['loss_weights'],
                                                     self.config['tracking']['use_sil_for_loss'], self.config['tracking']['sil_thres'],
                                                     self.config['tracking']['use_l1'], self.config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
@@ -635,7 +641,7 @@ class GaussianSLAM:
 
         elif time_idx > 0 and self.config['tracking']['use_gt_poses']:
                 # Get the ground truth pose relative to frame 0
-                rel_w2c = self.gt_w2c_all_frames[-1]
+                rel_w2c = self.gt_w2c_all_frames[-1]    # Let's take the last frame as the GT pose
                 rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
                 rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot) # shape(1,4)
                 rel_w2c_tran = rel_w2c[:3, 3].detach() # shape(3,)
@@ -643,7 +649,7 @@ class GaussianSLAM:
                 self.params['cam_unnorm_rots'][..., time_idx] = rel_w2c_rot_quat
                 self.params['cam_trans'][..., time_idx] = rel_w2c_tran
 
-        # Mapping 
+        ############ Mapping ############
         if time_idx == 0 or (time_idx+1) % self.config['map_every'] == 0:
             # Densification
             if self.config['mapping']['add_new_gaussians'] and time_idx > 0:
@@ -1130,6 +1136,8 @@ class GaussianSLAM:
         os.makedirs(save_plot_dir, exist_ok=True)
         plt.savefig(os.path.join(save_plot_dir, f"mapping_iter_%04d.png" % time_idx), bbox_inches='tight')
         plt.close()
+
+        # return curr_data['im'].cpu().permute(1, 2, 0), viz_render_img
 
     def global_planning(self, follower: habitat_sim.GreedyGeodesicFollower, agent_pose: np.array):
         """

@@ -26,19 +26,21 @@ class FrontierSearch():
     """
     def __init__(self, step, step_ego_grid_crops_3: np.ndarray, min_frontier_size: int, travel_point: str):
         self.step = step
-        self.map = Map(step_ego_grid_crops_3)
-        self.flatMap = self.map.getCharMap()
-        self.size_x, self.size_y = self.map.getSizeInCells()
+        self.map = Map(step_ego_grid_crops_3)                   # Create the map with values 0 (VOID), 1 (OCCUPIED), 2 (FREE)
+        self.flatMap = self.map.getCharMap()                
+        self.size_x, self.size_y = self.map.getSizeInCells()    # Size of the map
         self.min_frontier_size = min_frontier_size
         self.travel_point = travel_point
         self.frontier_arr = None
         self.random_magnitude = 15
-        
+
     """
     next long term goal
     """
     def nextGoal(self, pose_coords, _rel_pose, min_thresh: int = 4):
+
         frontiers = self.searchFrom(pose_coords)
+        # If there are no frontiers, go backward
         if len(frontiers) == 0:
             ori = _rel_pose[0,2] + math.pi / 2
             x = math.cos(math.pi *5/4)
@@ -59,12 +61,13 @@ class FrontierSearch():
                 print("no frontier within thresh. picking furthest")
                 closest_frontier = frontiers[-1]
             return np.array([[[closest_frontier.travel_point.x, closest_frontier.travel_point.y]]])
-            
+    
     """
     * @brief Runs search implementation, outward from the start position
     * @param position Initial position to search from
     * @return List of frontiers, if any
     """
+    # The idea of this function is to find free cells that are adjacent to unknown/VOID cells
     def searchFrom(self, pose_coords) -> list:
         frontier_list = []
         mx, my = pose_coords[0][0][0], pose_coords[0][0][1]    
@@ -88,9 +91,10 @@ class FrontierSearch():
         visited_flag[bfs[0]] = True
 
         while bfs:
-            idx = bfs.pop(0)
-
-            for nbr in self.map.nhood8(idx): 
+            idx = bfs.pop(0) 
+            
+            # Let's check if the cell is a frontier cell
+            for nbr in self.map.nhood8(idx): # get 8-connected neighbourhood indexes
                 # add to queue all free, unvisited cells, use descending search in case initialized on non-free cell
 #                if self.flatMap[nbr] <= self.flatMap[idx] and not visited_flag[nbr]:
                 if self.flatMap[nbr] == FREE and not visited_flag[nbr]:
