@@ -453,8 +453,6 @@ class Navigator(object):
         observations_cpu = self.test_ds.sim.sim.get_sensor_observations()
         observations = {"rgb": torch.from_numpy(observations_cpu["rgb"]).cuda(), "depth": torch.from_numpy(observations_cpu["depth"]).cuda(), "semantic": torch.from_numpy(observations_cpu["depth"]).cuda()}
         img = observations['rgb'][:, :, :3]
-        print("RGB dize: ",observations['rgb'].shape)
-        print("Depth dize: ",observations['depth'].shape)
         depth_init = observations['depth'].reshape(1, observations['depth'].shape[0], observations['depth'].shape[1])
         # semantic = observations['semantic'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
         

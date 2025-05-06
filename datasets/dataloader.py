@@ -238,7 +238,7 @@ class HabitatDataScene(Dataset):
         self.cell_size = options.cell_size
         self.crop_size = (options.crop_size, options.crop_size)
         self.img_size = (options.img_size, options.img_size)
-        print("Image size:", self.img_size)
+
         self.normalize = True
         self.pixFormat = 'NCHW'
         self.preprocessed_scenes_dir = options.root_path + options.scenes_dir + "mp3d_scene_pclouds/"

@@ -1,19 +1,17 @@
 # FisherRF Active Mapping Part
 
+
+
+
+
 ## Prepare data
-
-We use Gibson and HM3D dataset. 
-
-The gibson dataset can be downloaded from [here](https://docs.google.com/forms/d/e/1FAIpQLScWlx5Z1DM1M-wTSXaa6zV8lTFkPmTHW1LqMsoCBDWsTDjBkQ/viewform). We use scenes `Greigsville` `Denmark` `Cantwell` `Eudora` `Pablo` `Ribera` `Swormville` `Eastville` `Elmira`.
-
-The HM3D dataset can be downloaded from [here](https://niessner.github.io/Matterport/#download). We use scenes `DBjEcHFg4oq` `mscxX4KEBcB` `QKGMrurUVbk` `oPj9qMxrDEa` `CETmJJqkhcK` .
 
 The data should be organized as 
 
 ```
--- habitat-api
+-- data
     |
-    - - scene_datasets
+    - - versioned_data
         |
         - - hm3d
         |   |
@@ -26,58 +24,95 @@ The data should be organized as
             ...
 ```
 
-## Setup 
+# 🧭 Frontier-Based Navigation with Habitat
 
-We highly recommend using the docker image
+This project provides a framework for **frontier-based active exploration** using Habitat and a simplified navigation pipeline (without actual Gaussian splatting).
+
+---
+
+## 🚀 How to Run
+
+The main entry point is the script `mp3d.sh`. You need to:
+
+1. **Set the `DATADIR`** variable to point to your `versioned_data` folder.
+2. **List the scenes** you want to process (see examples inside `mp3d.sh`).
+
+This will launch the main Python script:
 
 ```bash
-# pull image
-docker pull wen3d/agslam:latest
-
-# run docker image
-docker run -it --runtime=nvidia \
-		-e QT_X11_NO_MITSHM=1  \
-		-e NVIDIA_VISIBLE_DEVICES=all \
-		-e NVIDIA_DRIVER_CAPABILITIES=all  \
-		--cpus=16 --memory=48g --shm-size=16g \
-		-v /home/kostas-lab/Documents/release:/root \
-        -v /home/kostas-lab/data:/data \
-		--cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-		-p 4461:80 -p 4462:5900 -p 4463:22 \
-		-e VNC_PASSWORD=YOUR_PASSWORD -e HTTP_PASSWORD=YOUR_PASSWORD \
-		wen3d/agslam:latest
+python main_navigation.py
 ```
 
-For GUI access, please refer to this [repo](https://github.com/fcwu/docker-ubuntu-vnc-desktop).
+according to the configuration specified in:
 
-You can access the vnc in your browser through `localhost:4461`
+```
+configs/mp3d_gaussian_FR_eccv.yaml
+```
 
-### Compile from source
+---
 
-We use habitat-sim and habitat-lab (both are v0.2.4). Please refer to the documentation [here](https://github.com/facebookresearch/habitat-sim/blob/f179b584bcd713c5a2a998132211e2cae881d6d1/BUILD_FROM_SOURCE.md).
+## ⚙️ Configuration Notes
 
-## Run Experiment
+- The **camera intrinsics** are configured based on the `img_size` parameter.
+- **⚠️ Warning:** The original authors hardcoded some parameters based on `img_size`. Currently, the code assumes `img_size=256x256`. Changing this value may require updating other parts of the code accordingly.
+
+---
+
+## 🧠 Pipeline Breakdown
+
+1. Inside `main_navigation.py`, you need to set:
+   - `dataset_type` (e.g., `hm3d`)
+   - The evaluation `split`
+
+2. A `Navigator` object is created from `tester_navigator.py`, which runs frontier-based navigation.
+
+3. The **Habitat environment** is initialized using settings defined in `train_options.py`.
+
+4. A `GaussianSLAM` object is also created:
+   - **Note:** This is used **only for loading configuration files**. Gaussian splats are **not used** in this navigation pipeline.
+
+---
+
+## 🔄 Exploration Logic
+
+- The agent begins by performing a **360-degree scan** of the environment.
+- At each step, the **occupancy map** is updated based on camera depth measurements.
+
+---
+
+## 🌍 Frontier Planning
+
+- The global planning module in `astar.py` builds **frontiers** from the current occupancy map.
+- It generates **6D candidate poses** using the `"combined"` policy (a trade-off between selecting the largest and the closest frontier).
+   - This behavior can be changed in `mp3d_gaussian_FR_eccv.yaml`.
+
+- Then, `action_planning_frontier()` uses the **A\\*** algorithm to plan a path toward the selected frontier.
+
+---
+
+## 📦 Other Functions
+
+- `store_filtered_pointcloud()`:
+   - Updates the global point cloud at every step.
+   - By default, **only 5%** of the new points are retained (can be changed manually).
+
+- `count_visible_points()`:
+   - Takes as input:
+     - A global point cloud (`numpy` array),
+     - A 6D camera pose,
+     - The camera intrinsics,
+     - The image size.
+   - Returns the number of 3D points visible from that pose.
+
+
 
 ```bash
-# In your docker container, clone the repo
+# In your env, clone the repo
 git clone xxx --recursive
 
 cd thirdparty/simple-knn && python -m pip install -e . 
 cd thirdparty/diff-gaussian-rasterization-modified && python -m pip install -e . 
 
-# The dataset dir can be specified by the `DATADIR` variable
-
-# FisherRF results
-bash scripts/gibson.sh configs/mp3d_gaussian_FR_eccv.yaml
-
-# Frontier
-bash scripts/gibson.sh configs/mp3d_gaussian_FR_frontier.yaml
-
-# UPEN
-bash scripts/gibson.sh configs/mp3d_gaussian_UPEN_fbe.yaml
-
-# HM3D results
+# FisherRF results frontier
 bash scripts/mp3d.sh configs/mp3d_gaussian_FR_eccv.yaml
 ```
-
-Pretrained Gaussians can be found [here](https://drive.google.com/drive/folders/15aTH4025cbjs1Y81g1PjKbdSXOixgboV?usp=sharing).

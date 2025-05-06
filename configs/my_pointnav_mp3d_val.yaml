@@ -2,7 +2,7 @@
 
 defaults:
   - pointnav_base
-  - /habitat/dataset/pointnav: gibson
+  - /habitat/dataset/pointnav: hm3d
   - _self_
 
 habitat:
