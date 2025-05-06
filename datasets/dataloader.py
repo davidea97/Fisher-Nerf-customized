@@ -169,7 +169,6 @@ class HabitatDataScene(Dataset):
         self.sim.seed(seed)
 
         ## Load episodes of scene_id
-        print("Root path:", options.root_path)
         # Pointnav val episodes are all in a single file
         if options.dataset_type == "mp3d":
             ep_file_path = os.path.join(options.root_path, "data/datasets/pointnav/mp3d/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
@@ -229,7 +228,8 @@ class HabitatDataScene(Dataset):
 
         ## Dataloader params
         self.hfov = float(cfg.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor.hfov) * np.pi / 180.
-
+        print("HFOV:", self.hfov)
+        print("OPTIONS:", options)
         self.cfg_norm_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.normalize_depth
         self.max_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.max_depth
         self.min_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.min_depth
@@ -238,6 +238,7 @@ class HabitatDataScene(Dataset):
         self.cell_size = options.cell_size
         self.crop_size = (options.crop_size, options.crop_size)
         self.img_size = (options.img_size, options.img_size)
+        print("Image size:", self.img_size)
         self.normalize = True
         self.pixFormat = 'NCHW'
         self.preprocessed_scenes_dir = options.root_path + options.scenes_dir + "mp3d_scene_pclouds/"

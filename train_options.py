@@ -104,7 +104,7 @@ class TrainOptions(BaseOptions):
         self.parser.add_argument('--crop_size', type=int, default=160, dest='crop_size',
                                     help='Size of crop around the agent')
 
-        self.parser.add_argument('--img_size', dest='img_size', type=int, default=800)
+        self.parser.add_argument('--img_size', dest='img_size', type=int, default=256)
 
         train.add_argument('--map_loss_scale', type=float, default=1.0, dest='map_loss_scale')
 

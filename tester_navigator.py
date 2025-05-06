@@ -143,6 +143,42 @@ def save_pointcloud(rgb, depth, intrinsics, pose, save_path, obj_mask=None):
     # Save
     o3d.io.write_point_cloud(save_path, pcd)
 
+
+def count_visible_points(global_pts, c2w, intrinsics, img_size):
+    """
+    Return the 3D points visible from the given camera pose (ignoring depth bounds).
+    
+    Args:
+        global_pts (np.ndarray): (N, 3) point cloud in world coordinates.
+        c2w (np.ndarray): (4, 4) camera-to-world matrix.
+        intrinsics (tuple): (fx, fy, cx, cy)
+        img_size (tuple): (H, W)
+    
+    Returns:
+        visible_pts (np.ndarray): subset of global_pts visible from camera
+    """
+    fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+    cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+    H, W = img_size, img_size
+    
+    # Transform points to camera frame
+    w2c = np.linalg.inv(c2w)
+    pts_cam = (w2c[:3, :3] @ global_pts.T + w2c[:3, 3:4]).T  # (N, 3)
+
+    # Filter points in front of camera
+    valid_z = pts_cam[:, 2] > 0
+    pts_cam = pts_cam[valid_z]
+    visible_world_pts = global_pts[valid_z]
+
+    # Project to image plane
+    u = fx * pts_cam[:, 0] / pts_cam[:, 2] + cx
+    v = fy * pts_cam[:, 1] / pts_cam[:, 2] + cy
+
+    in_frame = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    visible_pts = visible_world_pts[in_frame]
+
+    return visible_pts
+
 class NoFrontierError(Exception):
     pass
 
@@ -198,7 +234,6 @@ class Navigator(object):
                 config_file = self.options.config_test_file_noisy
             else:
                 config_file = self.options.config_test_file
-
 
         # Load config
         self.slam_config = get_cfg_defaults()
@@ -269,6 +304,111 @@ class Navigator(object):
         self.habvis = HabitatVisualizer(self.policy_eval_dir, scene_id) 
         self.cfg = self.slam_config # unified abberavation
 
+        # Initialize a 3D global pointcloud that we want to fill
+        self.global_pcd = o3d.geometry.PointCloud()
+
+    def store_pointcloud(self, rgb, depth, intrinsics, pose):
+        height, width = depth.shape
+        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+        cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+
+        # Create Open3D RGBD image
+        rgb_o3d = o3d.geometry.Image(rgb.astype(np.uint8))
+        depth_o3d = o3d.geometry.Image(depth.astype(np.float32))  # depth in meters
+
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            rgb_o3d, depth_o3d,
+            convert_rgb_to_intensity=False,
+            depth_scale=1.0,
+            depth_trunc=100.0)
+
+        # Intrinsics
+        intrinsic = o3d.camera.PinholeCameraIntrinsic()
+        intrinsic.set_intrinsics(width, height, fx, fy, cx, cy)
+
+        # Point cloud
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
+
+        # Apply camera-to-world transformation
+        if pose is not None:
+            pcd.transform(pose)
+
+        # Add to global point cloud
+        self.global_pcd += pcd
+
+    def store_filtered_pointcloud(self, rgb, depth, intrinsics, pose, keep_ratio=0.05, step = None):
+        height, width = depth.shape
+        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+        cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+
+        # Create Open3D RGBD image
+        rgb_o3d = o3d.geometry.Image(rgb.astype(np.uint8))
+        depth_o3d = o3d.geometry.Image(depth.astype(np.float32))  # depth in meters
+
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            rgb_o3d, depth_o3d,
+            convert_rgb_to_intensity=False,
+            depth_scale=1.0,
+            depth_trunc=100.0)
+
+        # Intrinsics
+        intrinsic = o3d.camera.PinholeCameraIntrinsic()
+        intrinsic.set_intrinsics(width, height, fx, fy, cx, cy)
+
+        # Point cloud
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
+
+        # Transform to world
+        if pose is not None:
+            pcd.transform(pose)
+        
+        # print("Point cloud size before filtering: ", len(pcd.points))
+        # Remove NaN or infinite points
+        pcd.remove_non_finite_points()
+        # print("Point cloud size after filtering: ", len(pcd.points))
+        # Convert to numpy
+        pts = np.asarray(pcd.points)
+        colors = np.asarray(pcd.colors)
+
+        # Skip if empty
+        if len(pts) == 0:
+            return
+
+        # Subsample points: keep only N% of them
+        num_points = pts.shape[0]
+        num_to_keep = int(keep_ratio * height * width)
+
+        if num_points > num_to_keep:
+            indices = np.random.choice(num_points, size=num_to_keep, replace=False)
+            pts = pts[indices]
+            colors = colors[indices]
+        
+        # Rebuild the point cloud
+        filtered_pcd = o3d.geometry.PointCloud()
+        filtered_pcd.points = o3d.utility.Vector3dVector(pts)
+        filtered_pcd.colors = o3d.utility.Vector3dVector(colors)
+        # print("Filtered point cloud size: ", len(filtered_pcd.points))
+
+        pts_tensor = torch.from_numpy(pts).float()         # shape: (N, 3)
+        colors_tensor = torch.from_numpy(colors).float()   # shape: (N, 3)
+
+        if not hasattr(self, 'global_pts_tensor'):
+            self.global_pts_tensor = pts_tensor
+            self.global_colors_tensor = colors_tensor
+        else:
+            self.global_pts_tensor = torch.vstack([self.global_pts_tensor, pts_tensor])
+            self.global_colors_tensor = torch.vstack([self.global_colors_tensor, colors_tensor])
+        
+        print("Global point cloud size: ", len(self.global_pts_tensor))
+
+        # # Add to global map
+        # self.global_pcd += filtered_pcd
+        # print("Global point cloud size after adding: ", len(self.global_pcd.points))
+
+        # if step ==20:
+        #     save_path = os.path.join(self.policy_eval_dir, f"pointcloud/global_pcl_{step}.ply")
+        #     o3d.io.write_point_cloud(save_path, self.global_pcd)
+
     def add_dynamic_object(self):
 
         from SimObjects import SimObject
@@ -309,13 +449,14 @@ class Navigator(object):
     @torch.no_grad()
     def frontier_test_navigation(self):
         self.test_ds.sim.sim.reset()
-        episode = None
-
+        episode = None        
         observations_cpu = self.test_ds.sim.sim.get_sensor_observations()
         observations = {"rgb": torch.from_numpy(observations_cpu["rgb"]).cuda(), "depth": torch.from_numpy(observations_cpu["depth"]).cuda(), "semantic": torch.from_numpy(observations_cpu["depth"]).cuda()}
         img = observations['rgb'][:, :, :3]
-        depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
-        semantic = observations['semantic'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
+        print("RGB dize: ",observations['rgb'].shape)
+        print("Depth dize: ",observations['depth'].shape)
+        depth_init = observations['depth'].reshape(1, observations['depth'].shape[0], observations['depth'].shape[1])
+        # semantic = observations['semantic'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
         
         if self.dynamic_scene:
             new_obj = self.add_dynamic_object()
@@ -327,7 +468,7 @@ class Navigator(object):
                 
         # resume SLAM system if neededs
         slam = GaussianSLAM(self.slam_config)
-        slam.init(img, depth, w2c_t)
+        # slam.init(img, depth_init, w2c_t)
 
         # resume from slam
         t = slam.cur_frame_idx + 1
@@ -343,11 +484,11 @@ class Navigator(object):
         observations = self.test_ds.sim.sim.get_sensor_observations()
         observations = {"rgb": torch.from_numpy(observations["rgb"]).cuda(), "depth": torch.from_numpy(observations["depth"]).cuda()}
         img = observations['rgb'][:, :, :3] # (H, W, 3)
-        depth = observations['depth'].reshape(self.test_ds.img_size[0], self.test_ds.img_size[1], 1) # (H, W, 1)
+        # depth = observations['depth'].reshape(self.test_ds.img_size[0], self.test_ds.img_size[1], 1) # (H, W, 1)
         init_c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
         # init_c2w_t = torch.from_numpy(init_c2w).float().cuda()
         intrinsics = torch.linalg.inv(self.test_ds.inv_K).cuda()
-
+        print("Intrinsics: ", intrinsics)
         self.abs_poses = []
 
         # init local policy, in the first steps it explores the local area by scanning the environment
@@ -366,7 +507,7 @@ class Navigator(object):
             os.makedirs(os.path.join(self.policy_eval_dir, "depth"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "semantic"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "bw_mask"), exist_ok=True)
-            os.makedirs(os.path.join(self.policy_eval_dir, "pointcloud"), exist_ok=True)
+        os.makedirs(os.path.join(self.policy_eval_dir, "pointcloud"), exist_ok=True)
 
         # === Load DINOv2 ===   
         if self.dynamic_scene:
@@ -384,7 +525,8 @@ class Navigator(object):
             while t < self.options.max_steps:
                 # print(f"##### STEP: {t} #####")
                 img = observations['rgb'][:, :, :3]
-                depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
+                # depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
+                depth = observations['depth'].reshape(1, observations['depth'].shape[0], observations['depth'].shape[1])
                 agent_state = self.test_ds.sim._sim.get_agent_state()
                 agent_rotation = agent_state.rotation  # quaternion: x, y, z, w
                 agent_translation = agent_state.position
@@ -397,11 +539,11 @@ class Navigator(object):
                 # Save single rgb, depth, semantic for debugging
                 observations_cpu = self.test_ds.sim.sim.get_sensor_observations()
                 rgb_bgr = cv2.cvtColor(observations_cpu["rgb"], cv2.COLOR_RGB2BGR)
-                # depth_vis_gray = (observations_cpu["depth"] / 10.0 * 255).astype(np.uint8)
+                depth_vis_gray = (observations_cpu["depth"] / 10.0 * 255).astype(np.uint8)
                 depth_raw = (observations_cpu["depth"])
-                # depth_vis = cv2.cvtColor(depth_vis_gray, cv2.COLOR_GRAY2BGR)
-                # semantic_obs_uint8 = (observations_cpu["semantic"] % 40).astype(np.uint8)
-                # semantic_vis = d3_40_colors_rgb[semantic_obs_uint8]
+                depth_vis = cv2.cvtColor(depth_vis_gray, cv2.COLOR_GRAY2BGR)
+                semantic_obs_uint8 = (observations_cpu["semantic"] % 40).astype(np.uint8)
+                semantic_vis = d3_40_colors_rgb[semantic_obs_uint8]
                 if self.dynamic_scene:
                     save_path = os.path.join(self.policy_eval_dir, f"pointcloud/pcl_{t}.ply")
                     object_mask = (observations_cpu["semantic"] == new_obj.semantic_id).astype(np.uint8) * 255
@@ -419,16 +561,23 @@ class Navigator(object):
                             all_images.append(rgb_bgr)
                             all_selected_coord.append(selected_coord)
                             print("Dino descriptors shape: ", dino_descriptors.shape)
-                    
-                        # if t==25:
-                        #     dino_image_visualization(all_dino_descriptors, all_images, all_selected_coord)
-                    
+
                 if self.save_data:
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb/rgb_{t}.png"), rgb_bgr)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth/depth_{t}.png"), depth_vis)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"semantic/semantic_{t}.png"), semantic_vis)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_{t}.png"), object_mask_bw)                    
                     save_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, save_path, object_mask_bw)
+
+                # Store pcl to the global pcl
+                # self.store_pointcloud(rgb_bgr, depth_raw, intrinsics, pose)
+                
+                self.store_filtered_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, keep_ratio=0.05, step=t)
+                
+                global_pts = self.global_pts_tensor.cpu().numpy()
+                np_intrinsics = intrinsics.cpu().numpy()
+                points_visible = count_visible_points(global_pts, pose, np_intrinsics, self.options.img_size)
+                print("Visible points: ", len(points_visible))
 
                 c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
                 # print("Camera 2 world: ", c2w)
@@ -440,6 +589,7 @@ class Navigator(object):
                 
                 # 3d info
                 agent_pose, agent_height = utils.get_sim_location(agent_state=self.test_ds.sim.sim.get_agent_state())
+
                 self.abs_poses.append(agent_pose)
 
                 # Update habitat vis tool and save the current state

@@ -30,6 +30,7 @@ if __name__ == '__main__':
 
     options.dataset_type = "hm3d"
     options.split = "val"
+    options.img_size = 256
     scene_ids = options.scenes_list
     dynamic_scene = False
     dino_extraction = False

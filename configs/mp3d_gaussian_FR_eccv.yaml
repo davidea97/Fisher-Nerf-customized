@@ -10,11 +10,11 @@ policy:
 use_wandb: True
 
 H_reg_lambda: 0.000001
-num_frames: &total_frames 2100
+num_frames: &total_frames 2000
 checkpoint_interval: 1000
 # number of keyframes for local mapping
-forward_step_size: 0.05
-turn_angle: 5.
+forward_step_size: 0.065
+turn_angle: 10.
 path_end_weight: 30.
 opacity_pixel_weight: 0.0001
 
@@ -24,8 +24,8 @@ report_iter_progress: true
 save_checkpoints: true
 scene_radius_depth_ratio: 3
 use_wandb: false
-img_height: 800
-img_width: 800
+img_height: 256
+img_width: 256
 downsample_pcd: 4
 
 # mapping parameters
