@@ -153,7 +153,7 @@ class NavTester(object):
     def __init__(self, options, scene_id, dynamic_scene, dino_extraction):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.options = options
-        print("OPTIONS: ", self.options)
+
         # Load config
         self.slam_config = get_cfg_defaults()
         self.slam_config.merge_from_file(options.slam_config)

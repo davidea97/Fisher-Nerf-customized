@@ -598,10 +598,10 @@ class Navigator(object):
                 self.abs_poses.append(agent_pose)
 
                 # Update habitat vis tool and save the current state
-                if self.save_data:
-                    if t % 2 == 0:
-                        self.habvis.save_vis_seen(self.test_ds.sim.sim, t)
-                    self.habvis.update_fow_sim(self.test_ds.sim.sim)
+                # if self.save_data:
+                if t % 2 == 0:
+                    self.habvis.save_vis_seen(self.test_ds.sim.sim, t)
+                self.habvis.update_fow_sim(self.test_ds.sim.sim)
                 
                 # save habvis
                 if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0:
@@ -791,9 +791,6 @@ class Navigator(object):
 
             pos_np = pose_np[:3, 3].copy()
             pos_np[1] = current_agent_pos[1] # set the same heights
-
-            print("Pose np: ", pos_np[1])
-            torch.tensor()
 
             finish = self.policy.convert_to_map(pos_np[[0, 2]])[[1, 0]] # convert to z-x
             paths = self.policy.planning(finish) # A* Planning in [x, z]

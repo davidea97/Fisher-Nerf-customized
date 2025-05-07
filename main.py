@@ -23,7 +23,7 @@ from tester import NavTester
 def nav_testing(options, scene_id, dynamic_scene=False, dino_extraction=False):
     tester = NavTester(options, scene_id, dynamic_scene, dino_extraction)
     # tester.test_navigation()
-    tester.frontier_test_navigation()
+    tester.test_navigation()
 
 if __name__ == '__main__':
     __spec__ = None

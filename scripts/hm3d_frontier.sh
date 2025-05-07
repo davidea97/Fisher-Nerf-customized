@@ -9,7 +9,7 @@ SCENES=("00800-TEEsavR23oF")
 
 for scene in ${SCENES[@]}
 do
-    python main.py --name test_pointnav_exp \
+    python main_navigation.py --name test_pointnav_exp \
                     --ensemble_dir ckpt/ \
                     --slam_config ${CONFIG} \
                     --root_path ${DATADIR} \
