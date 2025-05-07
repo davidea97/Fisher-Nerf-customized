@@ -78,8 +78,8 @@ class HabitatDataScene(Dataset):
     def __init__(self, options, config_file, scene_id, slam_config, existing_episode_list=[], dynamic=False):
         self.scene_id = scene_id
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print("Config file:", config_file)
         cfg = habitat.get_config(config_file)
+
         OmegaConf.set_readonly(cfg, False)
         if options.dataset_type == "mp3d":
             scene_name = scene_id.split('-')[1] if '-' in scene_id else scene_id
@@ -99,7 +99,6 @@ class HabitatDataScene(Dataset):
         elif options.dataset_type == "habitat_test_scenes":
             cfg.habitat.simulator.scene = os.path.join(options.root_path, "habitat_test_scenes", "{}.glb".format(scene_id)) # scene_dataset_path
         
-        print("Scene:", cfg.habitat.simulator.scene)
         cfg.habitat.simulator.turn_angle = int(options.turn_angle)
         cfg.habitat.simulator.forward_step_size = options.forward_step_size
         cfg.habitat.environment.max_episode_steps = options.max_steps
@@ -116,46 +115,10 @@ class HabitatDataScene(Dataset):
         cfg.habitat.simulator.agents.main_agent.sim_sensors.semantic_sensor.width = slam_config.img_width
         cfg.habitat.simulator.agents.main_agent.sim_sensors.semantic_sensor.height = slam_config.img_height 
         OmegaConf.set_readonly(cfg, True)
-        print("Simulator config:", cfg.habitat.simulator)
+
         self.sim = habitat.Env(config=cfg)
-        
+        agent_state = self.sim.sim.get_agent_state()
 
-        # if dynamic:
-        #     obj_templates_mgr = self.sim._sim.get_object_template_manager()
-        #     rigid_obj_mgr = self.sim._sim.get_rigid_object_manager()
-        #     template_file_path = os.path.join(options.root_path, "habitat_example_objects_0.2/car")
-        #     scale_factor = 0.1
-        #     print("Loading object template from:", template_file_path)
-        #     template_id = obj_templates_mgr.load_configs(
-        #         str(template_file_path))[0]
-        #     obj_template = obj_templates_mgr.get_template_by_id(template_id)
-        #     obj_template.scale = [scale_factor, scale_factor, scale_factor]
-
-        #     obj_templates_mgr.register_template(obj_template)
-        #     # create sphere
-        #     new_obj = rigid_obj_mgr.add_object_by_template_id(template_id)
-        #     # self.default_agent = self.sim._sim.get_agent(0)
-        #     # self.rigid_obj.motion_type = habitat_sim.physics.MotionType.DYNAMIC   # It moves the object from the initial position (it cannot fly because the dynamic is enabled and it falls down)
-        #     agent_node = self.sim._sim.agents[0].scene_node
-        #     # Place object 1.0 meter in front of the camera
-        #     camera_forward_offset = [0.0, 0.0, -1.0]  # -Z is forward in Habitat-Sim
-        #     object_position = agent_node.transformation.transform_point(camera_forward_offset)
-        #     new_obj.translation = object_position
-
-        #     move_object = True
-        #     show_object_axes = False
-        #     sim_obj = SimObject(new_obj, moving=move_object, show_object_axes=show_object_axes)
-        #     if move_object:
-        #         linear_velocity = [0.0, 0.0, 0.3]
-        #         angular_velocity = [0.0, -1.0, 0.0]
-        #         sim_obj.enable_kinematic_velocity(linear_velocity, angular_velocity)
-            
-        #     position = new_obj.translation
-        #     rotation = new_obj.rotation  # This is a quaternion (x, y, z, w)
-
-        #     print("Object position (x, y, z):", position)
-        #     print("Object rotation (quaternion x, y, z, w):", rotation)
-            
         # Load pose noise models from Neural SLAM
         if options.noisy_pose:
             self.sensor_noise_fwd = \
@@ -228,8 +191,7 @@ class HabitatDataScene(Dataset):
 
         ## Dataloader params
         self.hfov = float(cfg.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor.hfov) * np.pi / 180.
-        print("HFOV:", self.hfov)
-        print("OPTIONS:", options)
+
         self.cfg_norm_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.normalize_depth
         self.max_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.max_depth
         self.min_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.min_depth
@@ -275,7 +237,7 @@ class HabitatDataScene(Dataset):
         xy_img = torch.vstack((x.reshape(1,self.img_size[0],self.img_size[1]), y.reshape(1,self.img_size[0],self.img_size[1])))
         points2D_step = xy_img.reshape(2, -1)
         self.points2D_step = torch.transpose(points2D_step, 0, 1) # Npoints x 2
-
+        
 
     def add_difficulty(self):
         ## Val episodes already have difficulty info where geo dist >13m is hard, >7m is medium, test episodes do not
@@ -362,7 +324,6 @@ class HabitatDataScene(Dataset):
             local3D_step = utils.depth_to_3D(depth, self.img_size, self.xs, self.ys, self.inv_K)
 
             agent_pose, y_height = utils.get_sim_location(agent_state=self.sim.get_agent_state())
-
             imgs[i,:,:,:] = imgData
             depth_resize = F.interpolate(depth_obsv.clone(), size=self.img_size, mode='nearest')
             depth_imgs[i,:,:,:] = depth_resize.squeeze(0)

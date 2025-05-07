@@ -275,12 +275,14 @@ class Navigator(object):
         self.options.forward_step_size = self.slam_config["forward_step_size"]
         self.options.turn_angle = self.slam_config["turn_angle"]
         self.options.occupancy_height_thresh = self.slam_config["policy"]["occupancy_height_thresh"]
-
+    
         self.test_ds = HabitatDataScene(self.options, config_file=config_file, slam_config=self.slam_config, scene_id=self.scene_id, dynamic=dynamic_scene)
         self.step_count = 0
         self.min_depth, self.max_depth = self.test_ds.min_depth, self.test_ds.max_depth
+
         self.policy_name = self.slam_config["policy"]["name"]
-        print("Policy name: ", self.policy_name)
+        # print("Policy name: ", self.policy_name)
+        # agent_state = self.test_ds.sim.sim.get_agent_state()
 
         if self.policy_name in ["DFS", "global_local_plan", "oracle", "pose-comp"]:
             self.policy = None
@@ -399,7 +401,7 @@ class Navigator(object):
             self.global_pts_tensor = torch.vstack([self.global_pts_tensor, pts_tensor])
             self.global_colors_tensor = torch.vstack([self.global_colors_tensor, colors_tensor])
         
-        print("Global point cloud size: ", len(self.global_pts_tensor))
+        # print("Global point cloud size: ", len(self.global_pts_tensor))
 
         # # Add to global map
         # self.global_pcd += filtered_pcd
@@ -419,10 +421,8 @@ class Navigator(object):
         template_file_path = os.path.join(self.options.root_path, "habitat_example_objects_0.2/space_robot")
         scale_factor = 0.1
 
-        print("Loading object template from:", template_file_path)
         template_id = obj_templates_mgr.load_configs(
             str(template_file_path))[0]
-        print("Template ID:", template_id)
         obj_template = obj_templates_mgr.get_template_by_id(template_id)
         obj_template.scale = [scale_factor, scale_factor, scale_factor]
 
@@ -448,7 +448,11 @@ class Navigator(object):
 
     @torch.no_grad()
     def frontier_test_navigation(self):
+        agent_state = self.test_ds.sim.sim.get_agent_state()
+        rgb_pos = agent_state.sensor_states['rgb'].position
         self.test_ds.sim.sim.reset()
+        agent_state = self.test_ds.sim.sim.get_agent_state()
+        rgb_pos = agent_state.sensor_states['rgb'].position
         episode = None        
         observations_cpu = self.test_ds.sim.sim.get_sensor_observations()
         observations = {"rgb": torch.from_numpy(observations_cpu["rgb"]).cuda(), "depth": torch.from_numpy(observations_cpu["depth"]).cuda(), "semantic": torch.from_numpy(observations_cpu["depth"]).cuda()}
@@ -484,7 +488,7 @@ class Navigator(object):
         img = observations['rgb'][:, :, :3] # (H, W, 3)
         # depth = observations['depth'].reshape(self.test_ds.img_size[0], self.test_ds.img_size[1], 1) # (H, W, 1)
         init_c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
-        # init_c2w_t = torch.from_numpy(init_c2w).float().cuda()
+
         intrinsics = torch.linalg.inv(self.test_ds.inv_K).cuda()
         print("Intrinsics: ", intrinsics)
         self.abs_poses = []
@@ -521,7 +525,9 @@ class Navigator(object):
             all_images = []
             all_selected_coord = []
             while t < self.options.max_steps:
-                # print(f"##### STEP: {t} #####")
+
+                print(f"##### UPDATING STEP: {t} #####")
+                start_step_time = time.time()
                 img = observations['rgb'][:, :, :3]
                 # depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
                 depth = observations['depth'].reshape(1, observations['depth'].shape[0], observations['depth'].shape[1])
@@ -543,7 +549,7 @@ class Navigator(object):
                 semantic_obs_uint8 = (observations_cpu["semantic"] % 40).astype(np.uint8)
                 semantic_vis = d3_40_colors_rgb[semantic_obs_uint8]
                 if self.dynamic_scene:
-                    save_path = os.path.join(self.policy_eval_dir, f"pointcloud/pcl_{t}.ply")
+                    
                     object_mask = (observations_cpu["semantic"] == new_obj.semantic_id).astype(np.uint8) * 255
                     object_mask_bw = cv2.cvtColor(object_mask, cv2.COLOR_GRAY2BGR)
                     if np.array(object_mask_bw).ndim == 3:
@@ -560,12 +566,13 @@ class Navigator(object):
                             all_selected_coord.append(selected_coord)
                             print("Dino descriptors shape: ", dino_descriptors.shape)
 
+                save_path = os.path.join(self.policy_eval_dir, f"pointcloud/pcl_{t}.ply")
                 if self.save_data:
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb/rgb_{t}.png"), rgb_bgr)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth/depth_{t}.png"), depth_vis)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"semantic/semantic_{t}.png"), semantic_vis)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_{t}.png"), object_mask_bw)                    
-                    save_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, save_path, object_mask_bw)
+                    save_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, save_path, None)
 
                 # Store pcl to the global pcl
                 # self.store_pointcloud(rgb_bgr, depth_raw, intrinsics, pose)
@@ -574,9 +581,9 @@ class Navigator(object):
                 
                 global_pts = self.global_pts_tensor.cpu().numpy()
                 np_intrinsics = intrinsics.cpu().numpy()
-                points_visible = count_visible_points(global_pts, pose, np_intrinsics, self.options.img_size)
-                print("Visible points: ", len(points_visible))
-
+                start_time_occ = time.time()
+                # points_visible = count_visible_points(global_pts, pose, np_intrinsics, self.options.img_size)
+                
                 c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
                 # print("Camera 2 world: ", c2w)
                 c2w_t = torch.from_numpy(c2w).float().cuda()
@@ -586,14 +593,15 @@ class Navigator(object):
                     cm.requeue()
                 
                 # 3d info
+                
                 agent_pose, agent_height = utils.get_sim_location(agent_state=self.test_ds.sim.sim.get_agent_state())
-
                 self.abs_poses.append(agent_pose)
 
                 # Update habitat vis tool and save the current state
-                if t % 2 == 0:
-                    self.habvis.save_vis_seen(self.test_ds.sim.sim, t)
-                self.habvis.update_fow_sim(self.test_ds.sim.sim)
+                if self.save_data:
+                    if t % 2 == 0:
+                        self.habvis.save_vis_seen(self.test_ds.sim.sim, t)
+                    self.habvis.update_fow_sim(self.test_ds.sim.sim)
                 
                 # save habvis
                 if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0:
@@ -603,10 +611,10 @@ class Navigator(object):
                     self.habvis.save(save_path)
 
                 if self.policy_name == "frontier":
+                    
                     if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0 :
                         save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
                         self.policy.save(save_path)
-                    print(f"#### Frontier step {t} ####")
                     agent_state = self.test_ds.sim._sim.get_agent_state()
                     agent_rotation = agent_state.rotation  # quaternion: x, y, z, w
                     agent_translation = agent_state.position
@@ -621,10 +629,12 @@ class Navigator(object):
                     current_agent_pos = current_agent_pose[:3, 3]
                     
                     # update occlusion map
-                    self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
                     
+                    self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
+                    print("Occlusion map update time: ", time.time() - start_time_occ)
+                    print("End step time: ", time.time() - start_step_time)
                     # self.policy.visualize_map(c2w)
-                    print("Action queue size: ", action_queue.qsize())
+                    # print("Action queue size: ", action_queue.qsize())
                     while action_queue.empty():
                         # pause backend during evaluation
                         # slam.pause()
@@ -643,6 +653,7 @@ class Navigator(object):
 
                             global_points = global_points.cpu().numpy()
                             
+                 
                             # plan actions for each global goal
                             _, path_actions, paths_arr = self.action_planning_frontier(global_points, current_agent_pose, t)
                             best_path = path_actions[0]
@@ -780,6 +791,9 @@ class Navigator(object):
 
             pos_np = pose_np[:3, 3].copy()
             pos_np[1] = current_agent_pos[1] # set the same heights
+
+            print("Pose np: ", pos_np[1])
+            torch.tensor()
 
             finish = self.policy.convert_to_map(pos_np[[0, 2]])[[1, 0]] # convert to z-x
             paths = self.policy.planning(finish) # A* Planning in [x, z]
