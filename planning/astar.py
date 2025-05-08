@@ -299,10 +299,10 @@ class AstarPlanner:
         # set occ map np
         self.occ_map_np = binarymap
 
-        plt.figure()
-        plt.imshow(self.occ_map_np)
-        plt.savefig(os.path.join(self.eval_dir, "occmap_{}.png".format(frame_idx)))
-        plt.close()
+        # plt.figure()
+        # plt.imshow(self.occ_map_np)
+        # plt.savefig(os.path.join(self.eval_dir, "occmap_{}.png".format(frame_idx)))
+        # plt.close()
 
         self.free_space_np = self.build_connected_freespace(gaussian_points)
 
@@ -311,10 +311,10 @@ class AstarPlanner:
         # find the connected free space
         free_space = self.build_connected_freespace(gaussian_points)
         
-        plt.figure()
-        plt.imshow(free_space)
-        plt.savefig(os.path.join(self.eval_dir, "freespace_{}.png".format(self.frame_idx)))
-        plt.close()
+        # plt.figure()
+        # plt.imshow(free_space)
+        # plt.savefig(os.path.join(self.eval_dir, "freespace_{}.png".format(self.frame_idx)))
+        # plt.close()
 
         # find the unknown area
         prob, index = self.occ_map.max(dim=0)
@@ -338,7 +338,7 @@ class AstarPlanner:
         # frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
         
         # store frontier
-        cv2.imwrite(os.path.join(self.eval_dir, "frontier_{}.png".format(self.frame_idx)), frontier.astype(np.uint8) * 255)
+        # cv2.imwrite(os.path.join(self.eval_dir, "frontier_{}.png".format(self.frame_idx)), frontier.astype(np.uint8) * 255)
 
         # find connected components in frontier
         num_labels, labels = cv2.connectedComponents(frontier.astype(np.uint8))
@@ -545,7 +545,7 @@ class AstarPlanner:
             visualize:  
         """
         # build frontiers
-        print("GLOBAL PLANNING")
+        print(">> Global Planning")
         if self.frontier_select_method == "vlm":
             candidate_pos, free_space = self.build_vlm_frontiers(slam, gaussian_points)
         else:
@@ -594,8 +594,7 @@ class AstarPlanner:
                     eroded_free_space = torch.from_numpy(eroded_free_space).cuda()
                     free_pose = eroded_free_space[candidate_xy[:, 1], candidate_xy[:, 0]]
                     candidate_pose = candidate_pose[free_pose]
-        print("Candidate pose: ", len(candidate_pose))
-        print("Candidate pose: ", candidate_pose)
+
         # add uniformly sampled poses
         if not use_frontier:
             # random sampling     
@@ -616,10 +615,7 @@ class AstarPlanner:
         #     candidate_pose = torch.cat([candidate_pose, self.previous_candidates], dim=0)
 
         if pose_evaluation_fn is None:
-            print("Pose eval: ", self.pose_eval)
             scores, poses = self.pose_eval(candidate_pose)
-            print("Scores : ", scores)
-            print("Poses : ", poses)
         else:
             scores, poses = pose_evaluation_fn(candidate_pose, random_gaussian_params)
         #visualize
@@ -657,8 +653,8 @@ class AstarPlanner:
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
 
-            plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
-            plt.close()
+            # plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+            # plt.close()
 
         # and we only select the TOP 50 points
         topk = 20

@@ -1,10 +1,16 @@
 CONFIG=$1
 DATADIR=../data/versioned_data/
 
-# SCENES=("DBjEcHFg4oq" "mscxX4KEBcB" "QKGMrurUVbk" "oPj9qMxrDEa"  "CETmJJqkhcK")
+
+# HM3D scenes
 # SCENES=("00010-DBjEcHFg4oq" "00246-mscxX4KEBcB" "00285-QKGMrurUVbk" "00033-oPj9qMxrDEa"  "00051-CETmJJqkhcK")
-SCENES=("00800-TEEsavR23oF")
-# SCENES=("00814-p53SfW6mjZe" "00832-qyAac8rV8Zk" "00879-7Ukhou1GxYi" "00891-cvZr5TUy5C5"  "00898-8CRYizAb6yd")
+
+# Gibson scenes
+SCENES=("Greigsville" "Denmark" "Cantwell" "Eudora" "Pablo" "Ribera" "Swormville" "Eastville" "Elmira")
+# SCENES=("Greigsville")
+
+# Test
+# SCENES=("00800-TEEsavR23oF")
 
 
 for scene in ${SCENES[@]}

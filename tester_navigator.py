@@ -565,13 +565,13 @@ class Navigator(object):
                             all_images.append(rgb_bgr)
                             all_selected_coord.append(selected_coord)
                             print("Dino descriptors shape: ", dino_descriptors.shape)
+                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_{t}.png"), object_mask_bw) 
 
                 save_path = os.path.join(self.policy_eval_dir, f"pointcloud/pcl_{t}.ply")
                 if self.save_data:
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb/rgb_{t}.png"), rgb_bgr)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth/depth_{t}.png"), depth_vis)
-                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"semantic/semantic_{t}.png"), semantic_vis)
-                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_{t}.png"), object_mask_bw)                    
+                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"semantic/semantic_{t}.png"), semantic_vis)        
                     save_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, save_path, None)
 
                 # Store pcl to the global pcl
@@ -593,7 +593,6 @@ class Navigator(object):
                     cm.requeue()
                 
                 # 3d info
-                
                 agent_pose, agent_height = utils.get_sim_location(agent_state=self.test_ds.sim.sim.get_agent_state())
                 self.abs_poses.append(agent_pose)
 

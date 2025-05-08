@@ -85,7 +85,7 @@ class HabitatDataScene(Dataset):
             scene_name = scene_id.split('-')[1] if '-' in scene_id else scene_id
             cfg.habitat.simulator.scene = os.path.join(options.root_path, "data/scene_datasets/",  options.scenes_dir,  scene_id, "{}.glb".format(scene_name)) # scene_dataset_path
         elif options.dataset_type == "gibson":
-            cfg.habitat.simulator.scene = options.root_path + "/data/scene_datasets/" + options.scenes_dir + scene_id + '.glb'
+            cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id + '.glb')
         elif options.dataset_type == "replica":
             cfg.habitat.simulator.scene = os.path.join(options.root_path, "data/scene_datasets/",  options.scenes_dir,  scene_id, 'habitat/mesh_semantic.ply')
         elif options.dataset_type == "hm3d":
@@ -142,7 +142,9 @@ class HabitatDataScene(Dataset):
             ep_file_path = os.path.join("../data/datasets/pointnav/habitat_test_scenes/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
             print("Episode file path:", ep_file_path)
         elif options.dataset_type == "gibson":
-            ep_file_path = os.path.join(options.root_path, "data/datasets/pointnav/gibson/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
+            # ep_file_path = os.path.join(options.root_path, "data/datasets/pointnav/gibson/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
+            ep_file_path = os.path.join(options.root_path, options.dataset_type, "pointnav_gibson_v2", cfg.habitat.dataset.split, "content", scene_id+ ".json.gz")
+            print("-------- Episode file path:", ep_file_path)
         elif options.dataset_type == "replica":
             ep_file_path = os.path.join(options.root_path, "data/scene_datasets/Replica", scene_id, "habitat/replica_stage.stage_config.json")
         
@@ -191,7 +193,7 @@ class HabitatDataScene(Dataset):
 
         ## Dataloader params
         self.hfov = float(cfg.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor.hfov) * np.pi / 180.
-
+        print("HFOV:", self.hfov)
         self.cfg_norm_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.normalize_depth
         self.max_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.max_depth
         self.min_depth = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor.min_depth

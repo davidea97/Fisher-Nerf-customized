@@ -389,7 +389,9 @@ class GaussianSLAM:
             config
         """
         # Camera intrinsics
+        print("Config: ", config)
         calibration = config["SLAM"]["Dataset"]["Calibration"]
+        print("Calibration: ", calibration)
         # Camera prameters
         width = calibration["width"]
         height = calibration["height"]
@@ -770,7 +772,7 @@ class GaussianSLAM:
                                         mapping=True, online_time_idx=time_idx)
                 progress_bar.close()
 
-            self.visualize_frame(time_idx, curr_data, time_idx)
+            # self.visualize_frame(time_idx, curr_data, time_idx)
 
         # Add frame to keyframe list
         if ((time_idx == 0)  or  ((time_idx+1) % self.config['keyframe_every'] == 0) or \
