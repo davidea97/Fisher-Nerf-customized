@@ -11,7 +11,9 @@ class TrainOptions(BaseOptions):
         req = self.parser.add_argument_group('Required')
         req.add_argument('--name', default="test_pointnav_exp", help='Name of the experiment')
         req.add_argument('--slam_config', type=str, help='config file for SLAM')
-
+        req.add_argument('--dataset', type=str, default="mp3d", help='Dataset to use')
+        req.add_argument('--dataset_split', type=str, default="train", help='Split of the dataset to load the gz file from the right split folder')
+                         
         gen = self.parser.add_argument_group('General')
         gen.add_argument('--time_to_run', type=int, default=3600000,
                          help='Total time to run in seconds')

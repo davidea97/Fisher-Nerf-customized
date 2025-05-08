@@ -350,7 +350,7 @@ class NavTester(object):
         self.global_pcd += filtered_pcd
         # print("Global point cloud size after adding: ", len(self.global_pcd.points))
 
-        if step == self.options.max_steps - 1 or step == int(self.options.max_steps/2):
+        if step == self.options.max_steps or step == int(self.options.max_steps/2):
             save_path = os.path.join(self.policy_eval_dir, f"pointcloud/global_pcl_{step}.ply")
             o3d.io.write_point_cloud(save_path, self.global_pcd)
 
@@ -464,7 +464,7 @@ class NavTester(object):
             all_dino_descriptors = []
             all_images = []
             all_selected_coord = []
-            while t < self.options.max_steps:
+            while t= < self.options.max_steps:
                 print(f"##### NAVIGATION STEP: {t} #####")
                 img = observations['rgb'][:, :, :3]
                 depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])

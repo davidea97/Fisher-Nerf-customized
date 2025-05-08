@@ -6,8 +6,13 @@ DATADIR=../data/versioned_data/
 # SCENES=("00010-DBjEcHFg4oq" "00246-mscxX4KEBcB" "00285-QKGMrurUVbk" "00033-oPj9qMxrDEa"  "00051-CETmJJqkhcK")
 
 # Gibson scenes
+DATASET="gibson"
+DATASET_SPLIT="train"
 SCENES=("Greigsville" "Denmark" "Cantwell" "Eudora" "Pablo" "Ribera" "Swormville" "Eastville" "Elmira")
-# SCENES=("Greigsville")
+
+# MP3D scenes
+# SCENES=("00000-0a1b2c3d4e5f" "00001-0a1b2c3d4e5f" "00002-0a1b2c3d4e5f" "00003-0a1b2c3d4e5f" "00004-0a1b2c3d4e5f")
+
 
 # Test
 # SCENES=("00800-TEEsavR23oF")
@@ -22,5 +27,6 @@ do
                     --log_dir logs/ \
                     --scenes_list ${scene} \
                     --gpu_capacity 1 \
-                    --test_set v1 
+                    --test_set v1 \
+                    --dataset ${DATASET}
 done

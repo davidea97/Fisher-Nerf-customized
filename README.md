@@ -116,3 +116,23 @@ cd thirdparty/diff-gaussian-rasterization-modified && python -m pip install -e .
 # FisherRF results frontier
 bash scripts/mp3d.sh configs/mp3d_gaussian_FR_eccv.yaml
 ```
+
+# 🧭 Active-Nerf Evaluation
+
+To automatically run the evaluation of Active NeRF, simply modify the scripts/mp3d.sh script by updating the DATADIR variable with the path to your dataset. Additionally, specify the scenes you want to process in the SCENES variable, and set the appropriate DATASET and DATASET_SPLIT values to ensure the script loads the correct json.gz files from the corresponding directory.
+
+TODO:
+Consider adding a check in scripts/mp3d.sh to control whether the evaluation should be run for 1000 or 2000 steps. Currently, the script runs for 2000 steps for each scene and saves the point clouds (PCL) at both 1000 and 2000 steps. This allows you to evaluate coverage at your preferred step count, but it would be more efficient to make this configurable.
+
+```bash
+bash scripts/mp3d.sh configs/mp3d_gaussian_FR_eccv_gaussians.yaml
+```
+
+After running the evaluation, you’ll find a separate folder for each processed scene inside the experiments/GaussianSLAM directory. Within each scene folder, the pointcloud subdirectory contains two saved point clouds, each corresponding to a different number of evaluation steps (e.g., 1000 and 2000), clearly named to reflect this.
+
+To evaluate each point cloud against the ground truth .glb file using the coverage metric, you can use the command below. Make sure to adjust the path to the point cloud correctly in the script. For efficiency, it’s recommended to automate this process to handle multiple scenes simultaneously.
+
+```bash
+python scripts/evaluation.py
+```
+

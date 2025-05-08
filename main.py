@@ -29,7 +29,8 @@ if __name__ == '__main__':
     __spec__ = None
     options = TrainOptions().parse_args()
     # mp.set_start_method("spawn")
-    options.dataset_type = "gibson"
+    # print("OPtions: ", options.log_dir)
+    options.dataset_type = options.dataset
     options.split = "train"
     scene_ids = options.scenes_list
     dynamic_scene = False
