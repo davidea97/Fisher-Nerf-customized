@@ -6,13 +6,16 @@ DATADIR=../data/versioned_data/
 # SCENES=("00010-DBjEcHFg4oq" "00246-mscxX4KEBcB" "00285-QKGMrurUVbk" "00033-oPj9qMxrDEa"  "00051-CETmJJqkhcK")
 
 # Gibson scenes
-DATASET="gibson"
-DATASET_SPLIT="train"
-SCENES=("Greigsville" "Denmark" "Cantwell" "Eudora" "Pablo" "Ribera" "Swormville" "Eastville" "Elmira")
+# DATASET="gibson"
+# DATASET_SPLIT="train"
+# SCENES=("Greigsville" "Denmark" "Cantwell" "Eudora" "Pablo" "Ribera" "Swormville" "Eastville" "Elmira")
+
 
 # MP3D scenes
-# SCENES=("00000-0a1b2c3d4e5f" "00001-0a1b2c3d4e5f" "00002-0a1b2c3d4e5f" "00003-0a1b2c3d4e5f" "00004-0a1b2c3d4e5f")
-
+DATASET="MP3D"
+DATASET_SPLIT="train"
+# SCENES=("GdvgFV5R1Z5" "00001-0a1b2c3d4e5f" "00002-0a1b2c3d4e5f" "00003-0a1b2c3d4e5f" "00004-0a1b2c3d4e5f")
+SCENES=("GdvgFV5R1Z5")
 
 # Test
 # SCENES=("00800-TEEsavR23oF")

@@ -464,7 +464,7 @@ class NavTester(object):
             all_dino_descriptors = []
             all_images = []
             all_selected_coord = []
-            while t= < self.options.max_steps:
+            while t <= self.options.max_steps:
                 print(f"##### NAVIGATION STEP: {t} #####")
                 img = observations['rgb'][:, :, :3]
                 depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
@@ -637,7 +637,7 @@ class NavTester(object):
                         goal_pose = best_goal
                     
                     action_id = action_queue.get()
-                    time.sleep(1.)
+                    # time.sleep(1.)
 
                 elif self.policy_name == "UPEN":
                     action_id, finish = self.policy.predict_action(t, self.abs_poses, depth)    

@@ -81,9 +81,9 @@ class HabitatDataScene(Dataset):
         cfg = habitat.get_config(config_file)
 
         OmegaConf.set_readonly(cfg, False)
-        if options.dataset_type == "mp3d":
+        if options.dataset_type == "MP3D":
             scene_name = scene_id.split('-')[1] if '-' in scene_id else scene_id
-            cfg.habitat.simulator.scene = os.path.join(options.root_path, "data/scene_datasets/",  options.scenes_dir,  scene_id, "{}.glb".format(scene_name)) # scene_dataset_path
+            cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id, scene_id + '.glb')
         elif options.dataset_type == "gibson":
             cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id + '.glb')
         elif options.dataset_type == "replica":
@@ -133,8 +133,8 @@ class HabitatDataScene(Dataset):
 
         ## Load episodes of scene_id
         # Pointnav val episodes are all in a single file
-        if options.dataset_type == "mp3d":
-            ep_file_path = os.path.join(options.root_path, "data/datasets/pointnav/mp3d/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
+        if options.dataset_type == "MP3D":
+            ep_file_path = os.path.join(options.root_path, options.dataset_type, "pointnav_mp3d_v1", cfg.habitat.dataset.split, "content", scene_id+ ".json.gz")
         elif options.dataset_type == "hm3d":
             ep_file_path = os.path.join("../data/datasets/pointnav/hm3d/v1", cfg.habitat.dataset.split, cfg.habitat.dataset.split + ".json.gz")
             print("Episode file path:", ep_file_path)
