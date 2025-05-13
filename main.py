@@ -29,7 +29,7 @@ if __name__ == '__main__':
     options = TrainOptions().parse_args()
     options.dataset_type = options.dataset
     scene_ids = options.scenes_list
-    dynamic_scene = True
+    dynamic_scene = False
     dino_extraction = False
     save_data = True
 

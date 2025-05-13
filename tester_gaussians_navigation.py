@@ -1387,8 +1387,10 @@ class NavTester(object):
         # reset habvis
         self.habvis.reset()
         habvis_size = 768 if not hasattr(self, "policy") else self.policy.grid_dim[0]
-        self.habvis.set_map(self.test_ds.sim.sim, habvis_size, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
-
+        if self.dynamic_scene:
+            self.habvis.set_map(self.test_ds.sim.sim, habvis_size, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
+        else:
+            self.habvis.set_map(self.test_ds.sim.sim, habvis_size)
         # load from checkpoint
         if slam.cur_frame_idx > 0:
             folder = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
