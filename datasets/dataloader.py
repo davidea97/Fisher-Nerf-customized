@@ -117,6 +117,7 @@ class HabitatDataScene(Dataset):
         OmegaConf.set_readonly(cfg, True)
 
         self.sim = habitat.Env(config=cfg)
+
         agent_state = self.sim.sim.get_agent_state()
 
         # Load pose noise models from Neural SLAM

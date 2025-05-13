@@ -3,12 +3,25 @@ import habitat_sim
 import magnum as mn
 
 class SimObject:
-    def __init__(self, habitat_obj, name=None, moving=False, show_object_axes=False):
+    def __init__(self, habitat_obj, name=None, show_object_axes=False):
         self.obj = habitat_obj
         self.name = name or f"object_{id(habitat_obj)}"
-        self.moving = moving
         self.show_object_axes = show_object_axes
+        self.is_rotating = False
+        self.accumulated_rotation = 0.0  
+        self.rotation_step = np.pi / 30
+        self.obj_linear_velocity = np.array([0.0, 0.0, 3.0])
+        self.show_object_axes = False
 
+    def get_name(self):
+        return self.name
+    
+    def get_semantic_id(self):
+        if hasattr(self.obj, "semantic_id"):
+            return self.obj.semantic_id
+        else:
+            raise AttributeError(f"{self.name} does not have a semantic ID.")
+        
     def get_translation(self):
         return np.round(self.obj.translation, 2)
 
@@ -16,8 +29,23 @@ class SimObject:
         r = self.obj.rotation
         return np.round(np.array([r.vector.x, r.vector.y, r.vector.z, r.scalar]), 2)
     
+    def get_rotation_step(self):
+        return self.rotation_step
+    
+    def get_accumulated_rotation(self):
+        return self.accumulated_rotation
+    
+    def get_linear_velocity(self):
+        return np.round(self.obj_linear_velocity, 2)
+    
+    def set_rotation_quat(self, quat):
+        self.obj.rotation = quat
+
+    def set_rotation_step(self, step):
+        self.rotation_step = step
+
     def enable_kinematic_velocity(self, lin_vel, ang_vel, local=True):
-        self.obj.motion_type = habitat_sim.physics.MotionType.KINEMATIC
+        # self.obj.motion_type = habitat_sim.physics.MotionType.KINEMATIC
         vc = self.obj.velocity_control
         vc.linear_velocity = lin_vel
         vc.angular_velocity = ang_vel
@@ -25,7 +53,24 @@ class SimObject:
         vc.ang_vel_is_local = local
         vc.controlling_lin_vel = True
         vc.controlling_ang_vel = True
-        self.moving = True
+
+    def moving_forward_and_back(self, is_valid):
+        
+        if self.is_rotating:
+            self.enable_kinematic_velocity([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+            delta_quat = mn.Quaternion.rotation(mn.Rad(self.get_rotation_step()), mn.Vector3.y_axis())
+            current_rot = self.obj.rotation
+            self.obj.rotation = delta_quat * current_rot
+            self.accumulated_rotation += self.get_rotation_step()
+
+            if self.get_accumulated_rotation() >= np.pi:
+                self.is_rotating = False
+                self.accumulated_rotation = 0.0
+        else:
+            if not is_valid:
+                self.is_rotating = True 
+            else:
+                self.enable_kinematic_velocity(self.get_linear_velocity().tolist(), [0.0, 0.0, 0.0])
 
     def draw_frame(self, debug_drawer):
         if not self.show_object_axes:

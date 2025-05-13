@@ -22,27 +22,22 @@ from tester_gaussians_navigation import NavTester
 
 def nav_testing(options, scene_id, dynamic_scene=False, dino_extraction=False, save_data=False):
     tester = NavTester(options, scene_id, dynamic_scene, dino_extraction, save_data)
-    # tester.test_navigation()
     tester.test_gaussians_navigation()
 
 if __name__ == '__main__':
     __spec__ = None
     options = TrainOptions().parse_args()
-    # mp.set_start_method("spawn")
-    # print("OPtions: ", options.log_dir)
     options.dataset_type = options.dataset
-    options.split = "train"
     scene_ids = options.scenes_list
-    dynamic_scene = False
+    dynamic_scene = True
     dino_extraction = False
     save_data = True
-    # import pdb; pdb.set_trace()
+
     # Create iterables for map function
     n = len(scene_ids)
     options_list = [options] * n
     args = [*zip(options_list, scene_ids)]
     nav_testing(*args[0], dynamic_scene, dino_extraction, save_data)
     
-    # exiting the 'with'-block has stopped the pool
     print("Now the pool is closed and no longer available")
 

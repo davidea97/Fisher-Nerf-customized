@@ -55,6 +55,7 @@ from visualization.habitat_viz import HabitatVisualizer
 from IPython import embed
 
 import open3d as o3d
+import magnum as mn
 
 # Frontier policy exploration
 from frontier_exploration.frontier_search import FrontierSearch
@@ -161,17 +162,6 @@ class NavTester(object):
         self.dino_extraction = dino_extraction
         self.save_data = save_data
 
-        # os.makedirs(os.path.join(self.slam_config["workdir"], self.slam_config["run_name"]), exist_ok=True)
-        # print("Created folder: ", os.path.join(self.slam_config["workdir"], self.slam_config["run_name"]))
-        # write_config_file = os.path.join(self.slam_config["workdir"], self.slam_config["run_name"], "config.yaml")
-        # if os.path.exists(write_config_file):
-        #     # if file already exists, then reload.
-        #     logger.info(f"loading existing config at {write_config_file}")
-        #     self.slam_config.merge_from_file(write_config_file)
-        # else:
-        #     # copy config file
-        #     shutil.copy(self.options.slam_config, write_config_file)
-        
         if self.options.max_steps != self.slam_config["num_frames"]:
             logger.warn(f"max_steps {self.options.max_steps} != self.slam_config['num_frames'] {self.slam_config['num_frames']}, override self.options")
             self.options.max_steps = self.slam_config["num_frames"]
@@ -190,23 +180,8 @@ class NavTester(object):
         # tensorboardX SummaryWriter for use in save_summaries
         self.summary_writer = SummaryWriter(summary_dir)
 
-        # point to our generated test episodes
-        # self.options.episodes_root = "data/datasets/pointnav/mp3d/"+self.options.test_set+"/"
-        # self.options.episodes_root = "habitat-api/data/datasets/pointnav/mp3d/"+self.options.test_set+"/"
-        # self.options.episodes_root = "../data/datasets/pointnav/habitat-test-scenes/"+self.options.test_set+"/"
-
         self.scene_id = scene_id
         config_file = self.options.config_val_file
-        # if self.options.split=="val":
-        # if self.options.noisy_actions:
-        #     config_file = self.options.config_val_file_noisy
-        # else:
-        #     config_file = self.options.config_val_file
-        # elif self.options.split=="test":
-        #     if self.options.noisy_actions:
-        #         config_file = self.options.config_test_file_noisy
-        #     else:
-        #         config_file = self.options.config_test_file
 
         # Load config
         self.slam_config = get_cfg_defaults()
@@ -215,16 +190,20 @@ class NavTester(object):
         # Don't use multi layer directory because wandb doesn't support it
         self.slam_config["run_name"] = f"{self.scene_id}-{self.slam_config.run_name}"
 
-        os.makedirs(os.path.join(self.slam_config["workdir"], self.slam_config["run_name"]), exist_ok=True)
-        write_config_file = os.path.join(self.slam_config["workdir"], self.slam_config["run_name"], "config.yaml")
-        if os.path.exists(write_config_file):
-            # if file already exists, then reload.
-            logger.info(f"loading existing config at {write_config_file}")
-            self.slam_config.merge_from_file(write_config_file)
-            self.slam_config["run_name"] = f"{self.scene_id}-{self.slam_config.run_name}"
-        else:
-            # copy config file
-            shutil.copy(self.options.slam_config, write_config_file)
+        # Create the directory for the experiment results
+        os.makedirs(os.path.join(self.slam_config["workdir"], self.slam_config["run_name"], self.options.dataset_type), exist_ok=True)
+
+        # Save the run config file
+        write_config_file = os.path.join(self.slam_config["workdir"], self.slam_config["run_name"], self.options.dataset_type, "config.yaml")
+        shutil.copy(self.options.slam_config, write_config_file)
+        # if os.path.exists(write_config_file):
+        #     # if file already exists, then reload.
+        #     logger.info(f"loading existing config at {write_config_file}")
+        #     self.slam_config.merge_from_file(write_config_file)
+        #     self.slam_config["run_name"] = f"{self.scene_id}-{self.slam_config.run_name}"
+        # else:
+        #     # copy config file
+        #     shutil.copy(self.options.slam_config, write_config_file)
 
         
         if self.options.max_steps != self.slam_config["num_frames"]:
@@ -237,6 +216,7 @@ class NavTester(object):
 
         # Get the current time
         current_time = datetime.datetime.now()
+
         # Format the time as month-day-hour-minute
         formatted_time = current_time.strftime("%m-%d-%H-%M")
         wandb_id = "{}-{}".format(self.slam_config["run_name"], formatted_time)
@@ -254,14 +234,14 @@ class NavTester(object):
         self.step_count = 0
         self.min_depth, self.max_depth = self.test_ds.min_depth, self.test_ds.max_depth
         self.policy_name = self.slam_config["policy"]["name"]
-        print("Policy name: ", self.policy_name)
+        print(">> Policy name: ", self.policy_name)
 
         if self.policy_name in ["DFS", "global_local_plan", "oracle", "pose-comp"]:
             self.policy = None
         elif self.policy_name in ["astar_greedy", "frontier", "only_frontier"]:
             # Exploration parameters:
             self.policy = AstarPlanner(
-                self.slam_config, os.path.join(self.slam_config["workdir"], self.slam_config["run_name"])
+                self.slam_config, os.path.join(self.slam_config["workdir"], self.slam_config["run_name"], self.options.dataset_type)
             )
         elif self.policy_name == "UPEN":
             self.policy = UPEN(self.options, self.slam_config["policy"])
@@ -274,13 +254,49 @@ class NavTester(object):
         else:
             assert False, f"unkown policy name {self.slam_config['policy']['name']}"
 
-        self.policy_eval_dir = os.path.join(self.slam_config["workdir"], self.slam_config["run_name"])
+        self.policy_eval_dir = os.path.join(self.slam_config["workdir"], self.slam_config["run_name"], self.options.dataset_type)
         self.habvis = HabitatVisualizer(self.policy_eval_dir, scene_id) 
         self.cfg = self.slam_config # unified abberavation
 
         # Initialize a 3D global pointcloud that we want to fill
         self.global_pcd = o3d.geometry.PointCloud()
 
+        # Dynamic Object initialization
+        if self.dynamic_scene:
+            # physics_mgr = self.test_ds.sim._sim.get_physics_manager()
+            # camera_forward_offset = [0.0, 1.0, -1.0]
+            camera_forward_offset = [0.0, 1.0, 0.0]
+            self.sim_obj = self.initialize_dynamic_object("habitat_example_objects_0.2/space_robot", camera_forward_offset)
+            # self.last_obj_pos = np.array(self.sim_obj.get_translation())
+    
+    def initialize_dynamic_object(self, path_obj, camera_forward_offset, scale_factor=0.3):
+        obj_templates_mgr = self.test_ds.sim._sim.get_object_template_manager()
+        rigid_obj_mgr = self.test_ds.sim._sim.get_rigid_object_manager()
+        # template_file_path = os.path.join(self.options.root_path, "habitat_example_objects_0.2/car")
+        template_file_path = os.path.join(self.options.root_path, path_obj)
+        scale_factor = scale_factor
+
+        print("Loading object template from:", template_file_path)
+        template_id = obj_templates_mgr.load_configs(
+            str(template_file_path))[0]
+        print("Template ID:", template_id)
+        obj_template = obj_templates_mgr.get_template_by_id(template_id)
+        obj_template.scale = [scale_factor, scale_factor, scale_factor]
+
+        obj_templates_mgr.register_template(obj_template)
+        # create sphere
+        new_obj = rigid_obj_mgr.add_object_by_template_id(template_id)
+        new_obj.motion_type = habitat_sim.physics.MotionType.KINEMATIC
+        # self.default_agent = self.sim._sim.get_agent(0)
+        # self.rigid_obj.motion_type = habitat_sim.physics.MotionType.DYNAMIC   # It moves the object from the initial position (it cannot fly because the dynamic is enabled and it falls down)
+        agent_node = self.test_ds.sim._sim.agents[0].scene_node
+        # Place object 1.0 meter in front of the camera
+          # -Z is forward in Habitat-Sim
+        object_position = agent_node.transformation.transform_point(camera_forward_offset)
+        new_obj.translation = object_position
+        sim_obj = SimObject(new_obj)
+        return sim_obj
+    
     def store_filtered_pointcloud(self, rgb, depth, intrinsics, pose, keep_ratio=0.05, step = None):
         height, width = depth.shape
         fx, fy = intrinsics[0, 0], intrinsics[1, 1]
@@ -363,39 +379,8 @@ class NavTester(object):
         observations = {"rgb": torch.from_numpy(observations_cpu["rgb"]).cuda(), "depth": torch.from_numpy(observations_cpu["depth"]).cuda(), "semantic": torch.from_numpy(observations_cpu["depth"]).cuda()}
         img = observations['rgb'][:, :, :3]
         depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
-        semantic = observations['semantic'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
-        if self.dynamic_scene:
-            obj_templates_mgr = self.test_ds.sim._sim.get_object_template_manager()
-            rigid_obj_mgr = self.test_ds.sim._sim.get_rigid_object_manager()
-            # template_file_path = os.path.join(self.options.root_path, "habitat_example_objects_0.2/car")
-            template_file_path = os.path.join(self.options.root_path, "habitat_example_objects_0.2/space_robot")
-            scale_factor = 0.1
+        # semantic = observations['semantic'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
 
-            print("Loading object template from:", template_file_path)
-            template_id = obj_templates_mgr.load_configs(
-                str(template_file_path))[0]
-            print("Template ID:", template_id)
-            obj_template = obj_templates_mgr.get_template_by_id(template_id)
-            obj_template.scale = [scale_factor, scale_factor, scale_factor]
-
-            obj_templates_mgr.register_template(obj_template)
-            # create sphere
-            new_obj = rigid_obj_mgr.add_object_by_template_id(template_id)
-            # self.default_agent = self.sim._sim.get_agent(0)
-            # self.rigid_obj.motion_type = habitat_sim.physics.MotionType.DYNAMIC   # It moves the object from the initial position (it cannot fly because the dynamic is enabled and it falls down)
-            agent_node = self.test_ds.sim._sim.agents[0].scene_node
-            # Place object 1.0 meter in front of the camera
-            camera_forward_offset = [0.0, 1.0, -1.0]  # -Z is forward in Habitat-Sim
-            object_position = agent_node.transformation.transform_point(camera_forward_offset)
-            new_obj.translation = object_position
-            move_object = True
-            show_object_axes = False
-            sim_obj = SimObject(new_obj, moving=move_object, show_object_axes=show_object_axes)
-            if move_object:
-                linear_velocity = [0.0, 0.0, 3.0]
-                angular_velocity = [0.0, -5.0, 0.0]
-                sim_obj.enable_kinematic_velocity(linear_velocity, angular_velocity)
-        
         # Get Camera to World transform
         c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
         c2w_t = torch.from_numpy(c2w).float().cuda()
@@ -410,7 +395,7 @@ class NavTester(object):
         if len(weight_files) > 0:
             weight_files.sort(key=lambda x: int(x.split('/')[-1].split('.')[0][6:]))
             weight_file = weight_files[-1]
-            self.load_3d_gaussian(slam, weight_file )
+            self.load_3d_gaussian(slam, weight_file)
 
         # resume from slam
         t = slam.cur_frame_idx + 1
@@ -444,7 +429,7 @@ class NavTester(object):
         action_id = -1
         expansion = 1
         if self.save_data:
-            # os.makedirs(os.path.join(self.policy_eval_dir, "rgb"), exist_ok=True)
+            os.makedirs(os.path.join(self.policy_eval_dir, "rgb"), exist_ok=True)
             # os.makedirs(os.path.join(self.policy_eval_dir, "depth"), exist_ok=True)
             # os.makedirs(os.path.join(self.policy_eval_dir, "semantic"), exist_ok=True)
             # os.makedirs(os.path.join(self.policy_eval_dir, "bw_mask"), exist_ok=True)
@@ -452,12 +437,12 @@ class NavTester(object):
 
 
          # === Load DINOv2 ===   
-        if self.dynamic_scene:
-            from scripts.dino_extract import DINOExtract, extract_dino_features, dino_image_visualization
+        # if self.dynamic_scene:
+        #     from scripts.dino_extract import DINOExtract, extract_dino_features, dino_image_visualization
 
-            dino_export="../third_party/dino_models/dinov2_vitl14_pretrain.pth"
-            dino_extractor = DINOExtract(dino_export, feature_layer=1)
-            print("DINOv2 model loaded")
+        #     dino_export="../third_party/dino_models/dinov2_vitl14_pretrain.pth"
+        #     dino_extractor = DINOExtract(dino_export, feature_layer=1)
+        #     print("DINOv2 model loaded")
 
         print("Max steps: ", self.options.max_steps)
         try: 
@@ -467,20 +452,18 @@ class NavTester(object):
             while t <= self.options.max_steps:
                 print(f"##### NAVIGATION STEP: {t} #####")
                 img = observations['rgb'][:, :, :3]
-                depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
-                # obj_translation = new_obj.translation
-                # obj_rotation = new_obj.rotation  # This is a quaternion (x, y, z, w)
-                agent_state = self.test_ds.sim._sim.get_agent_state()
-                agent_rotation = agent_state.rotation  # quaternion: x, y, z, w
-                agent_translation = agent_state.position
-
-                quat = [agent_rotation.w, agent_rotation.x, agent_rotation.y, agent_rotation.z]  # w, x, y, z
-                rot_matrix = o3d.geometry.get_rotation_matrix_from_quaternion(quat)
-                # pose = np.eye(4)
-                # pose[:3, :3] = rot_matrix
-                # pose[:3, 3] = agent_translation
+                depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])                
+                if self.dynamic_scene:
+                    dt = 0.1
+                    current_pos = np.array(self.sim_obj.get_translation())
+                    local_velocity = mn.Vector3(self.sim_obj.get_linear_velocity())
+                    rotation = self.sim_obj.obj.rotation
+                    global_velocity = rotation.transform_vector(local_velocity)
+                    next_pose = current_pos + dt*global_velocity
+                    is_valid = self.test_ds.sim.sim.pathfinder.is_navigable(next_pose)
+                    self.sim_obj.moving_forward_and_back(is_valid)
+                   
                 pose = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
-                # print("Agent pose at step {}: {}".format(t, pose))
 
                 # Save single rgb, depth, semantic for debugging
                 observations_cpu = self.test_ds.sim.sim.get_sensor_observations()
@@ -490,33 +473,34 @@ class NavTester(object):
                 depth_vis = cv2.cvtColor(depth_vis_gray, cv2.COLOR_GRAY2BGR)
                 semantic_obs_uint8 = (observations_cpu["semantic"] % 40).astype(np.uint8)
                 semantic_vis = d3_40_colors_rgb[semantic_obs_uint8]
-                if self.dynamic_scene:
-                    
-                    object_mask = (observations_cpu["semantic"] == new_obj.semantic_id).astype(np.uint8) * 255
-                    object_mask_bw = cv2.cvtColor(object_mask, cv2.COLOR_GRAY2BGR)
-                    if np.array(object_mask_bw).ndim == 3:
 
-                        # Use only the first channel, assuming grayscale video auto-expanded to RGB
-                        object_mask_bw = object_mask_bw[:, :, 0]
-                    if self.dino_extraction:
-                        dino_descriptors, selected_coord = extract_dino_features(rgb_bgr, object_mask_bw, dino_extractor)
-                        if dino_descriptors.shape[0] == 0:
-                            print("DINO descriptors are empty!")
-                        else:
-                            all_dino_descriptors.append(dino_descriptors)
-                            all_images.append(rgb_bgr)
-                            all_selected_coord.append(selected_coord)
-                            print("Dino descriptors shape: ", dino_descriptors.shape)
+                # if self.dynamic_scene:
+                #     print("Semantic ID: ", self.sim_obj.get_semantic_id())
+                #     object_mask = (observations_cpu["semantic"] == self.sim_obj.get_semantic_id()).astype(np.uint8) * 255
+                #     print("Unique object mask values: ", np.unique(object_mask))
+                #     object_mask_bw = cv2.cvtColor(object_mask, cv2.COLOR_GRAY2BGR)
+                #     if np.array(object_mask_bw).ndim == 3:
 
-                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_{t}.png"), object_mask_bw)  
+                #         # Use only the first channel, assuming grayscale video auto-expanded to RGB
+                #         object_mask_bw = object_mask_bw[:, :, 0]
+                #     if self.dino_extraction:
+                #         dino_descriptors, selected_coord = extract_dino_features(rgb_bgr, object_mask_bw, dino_extractor)
+                #         if dino_descriptors.shape[0] == 0:
+                #             print("DINO descriptors are empty!")
+                #         else:
+                #             all_dino_descriptors.append(dino_descriptors)
+                #             all_images.append(rgb_bgr)
+                #             all_selected_coord.append(selected_coord)
+                #             print("Dino descriptors shape: ", dino_descriptors.shape)
 
-                    
-                # if self.save_data:
-                #     save_path = os.path.join(self.policy_eval_dir, f"pointcloud/pcl_{t}.ply")
-                #     cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb/rgb_{t}.png"), rgb_bgr)
-                #     cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth/depth_{t}.png"), depth_vis)
-                #     cv2.imwrite(os.path.join(self.policy_eval_dir, f"semantic/semantic_{t}.png"), semantic_vis)                         
-                #     save_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, save_path, None)
+                #     cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_{t}.png"), object_mask_bw)  
+
+                if self.save_data:
+                    # save_path = os.path.join(self.policy_eval_dir, f"pointcloud/pcl_{t}.ply")
+                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb/rgb_{t}.png"), rgb_bgr)
+                    # cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth/depth_{t}.png"), depth_vis)
+                    # cv2.imwrite(os.path.join(self.policy_eval_dir, f"semantic/semantic_{t}.png"), semantic_vis)                         
+                    # save_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, save_path, None)
 
                 self.store_filtered_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, keep_ratio=0.05, step=t)
                 c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
@@ -539,10 +523,16 @@ class NavTester(object):
                 self.abs_poses.append(agent_pose)
 
                 # Update habitat vis tool and save the current state
-                # if self.save_data:
-                if t % 200 == 0:
-                    self.habvis.save_vis_seen(self.test_ds.sim.sim, t)
-                self.habvis.update_fow_sim(self.test_ds.sim.sim)
+                if self.save_data:
+                    if t % 5 == 0:
+                        if self.dynamic_scene:
+                            self.habvis.save_vis_seen(self.test_ds.sim.sim, t, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
+                        else:
+                            self.habvis.save_vis_seen(self.test_ds.sim.sim, t)
+
+                    self.habvis.update_fow_sim(self.test_ds.sim.sim)
+                    if self.dynamic_scene:
+                        self.habvis.update_obj_sim(self.test_ds.sim.sim, self.sim_obj)
                 
                 # save habvis
                 if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0:
@@ -1362,7 +1352,7 @@ class NavTester(object):
                 t = slam.cur_frame_idx
             else:
                 # turn around for initialization
-                init_scan_steps = 72 if not self.options.debug else 2
+                init_scan_steps = 20 if not self.options.debug else 2
                 # for k in range(2):
                 for k in range(init_scan_steps):
                     action_queue.put(2)
@@ -1397,7 +1387,7 @@ class NavTester(object):
         # reset habvis
         self.habvis.reset()
         habvis_size = 768 if not hasattr(self, "policy") else self.policy.grid_dim[0]
-        self.habvis.set_map(self.test_ds.sim.sim, habvis_size)
+        self.habvis.set_map(self.test_ds.sim.sim, habvis_size, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
 
         # load from checkpoint
         if slam.cur_frame_idx > 0:

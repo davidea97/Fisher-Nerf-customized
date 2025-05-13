@@ -1,6 +1,6 @@
 
 workdir: experiments/GaussianSLAM
-run_name: eccv_reproduce
+run_name: results
 
 # planning parameters
 policy: 
