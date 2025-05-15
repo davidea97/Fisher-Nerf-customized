@@ -24,10 +24,19 @@ class SimObject:
         
     def get_translation(self):
         return np.round(self.obj.translation, 2)
+    
+    def set_translation(self, translation):
+        self.obj.translation = translation
+
+    def set_rotation(self, rotation):
+        self.obj.rotation = rotation
 
     def get_rotation_quat(self):
         r = self.obj.rotation
         return np.round(np.array([r.vector.x, r.vector.y, r.vector.z, r.scalar]), 2)
+    
+    def get_transformation(self):
+        return self.obj.transformation
     
     def get_rotation_step(self):
         return self.rotation_step

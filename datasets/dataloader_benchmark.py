@@ -19,62 +19,6 @@ from SimObjects import SimObject
 import cv2
 from habitat_sim.utils.common import d3_40_colors_rgb
 
-
-class HabitatDataOffline(Dataset):
-
-    def __init__(self, options, config_file, finetune=False):
-        config = get_config(config_file)
-        self.config = config
-        
-        self.finetune = finetune # whether we are running a finetuning active job
-
-        self.episodes_file_list = []
-        self.episodes_file_list += self.collect_stored_episodes(options, split=config.DATASET.SPLIT)
-        
-        if options.dataset_percentage < 1: # Randomly choose the subset of the dataset to be used
-            random.shuffle(self.episodes_file_list)
-            self.episodes_file_list = self.episodes_file_list[ :int(len(self.episodes_file_list)*options.dataset_percentage) ]
-        self.number_of_episodes = len(self.episodes_file_list)
-
-
-    def collect_stored_episodes(self, options, split):
-        episodes_dir = options.stored_episodes_dir + split + "/"
-        episodes_file_list = []
-        _scenes_dir = os.listdir(episodes_dir)
-        scenes_dir = [ x for x in _scenes_dir if os.path.isdir(episodes_dir+x) ]
-        for scene in scenes_dir:
-            for fil in os.listdir(episodes_dir+scene+"/"):
-                episodes_file_list.append(episodes_dir+scene+"/"+fil)
-        return episodes_file_list
-
-
-    def __len__(self):
-        return self.number_of_episodes
-
-
-    def __getitem__(self, idx):
-        # Load from the pre-stored objnav training episodes
-        ep_file = self.episodes_file_list[idx]
-        ep = np.load(ep_file)
-
-        abs_pose = ep['abs_pose']
-        step_ego_grid_crops_spatial = torch.from_numpy(ep['step_ego_grid_crops_spatial'])
-        gt_grid_crops_spatial = torch.from_numpy(ep['gt_grid_crops_spatial'])
-
-        ### Transform abs_pose to rel_pose
-        rel_pose = []
-        for i in range(abs_pose.shape[0]):
-            rel_pose.append(utils.get_rel_pose(pos2=abs_pose[i,:], pos1=abs_pose[0,:]))
-
-        item = {}
-        item['pose'] = torch.from_numpy(np.asarray(rel_pose)).float()
-        item['abs_pose'] = torch.from_numpy(abs_pose).float()
-        item['step_ego_grid_crops_spatial'] = step_ego_grid_crops_spatial
-        item['gt_grid_crops_spatial'] = gt_grid_crops_spatial # Long tensor, int64
-
-        return item
-
-
 ## Loads the simulator and episodes separately to enable per_scene collection of data
 class HabitatDataScene(Dataset):
 
@@ -87,7 +31,7 @@ class HabitatDataScene(Dataset):
         if options.dataset_type == "MP3D":
             scene_name = scene_id.split('-')[1] if '-' in scene_id else scene_id
             cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id, scene_id + '.glb')
-            # cfg.habitat.simulator.scene_dataset = os.path.join(options.root_path, options.dataset_type, "mp3d_annotated_basis.scene_dataset_config.json")
+            cfg.habitat.simulator.scene_dataset = os.path.join(options.root_path, options.dataset_type, "mp3d_annotated_basis.scene_dataset_config.json")
 
         elif options.dataset_type == "gibson":
             cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id + '.glb')
@@ -100,7 +44,7 @@ class HabitatDataScene(Dataset):
                 options.root_path,
                 "hm3d-0.2/hm3d/hm3d_annotated_basis.scene_dataset_config.json"
             )
-          
+                
         elif options.dataset_type == "habitat_test_scenes":
             cfg.habitat.simulator.scene = os.path.join(options.root_path, "habitat_test_scenes", "{}.glb".format(scene_id)) # scene_dataset_path
         

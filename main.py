@@ -20,24 +20,27 @@ sys.path.append(habitat_root)
 from train_options import TrainOptions
 from tester_gaussians_navigation import NavTester
 
-def nav_testing(options, scene_id, dynamic_scene=False, dino_extraction=False, save_data=False):
-    tester = NavTester(options, scene_id, dynamic_scene, dino_extraction, save_data)
+def nav_testing(options, scene_id, dynamic_scene=False, dino_extraction=False, save_data=False, save_map=False):
+    tester = NavTester(options, scene_id, dynamic_scene, dino_extraction, save_data, save_map)
     tester.test_gaussians_navigation()
 
 if __name__ == '__main__':
     __spec__ = None
     options = TrainOptions().parse_args()
     options.dataset_type = options.dataset
+    print("Options dataset split: ", options.dataset_split)
+    options.config_val_file = os.path.join("configs", f"my_pointnav_{options.dataset.lower()}_val.yaml")
     scene_ids = options.scenes_list
-    dynamic_scene = False
+    dynamic_scene = True
     dino_extraction = False
     save_data = True
+    save_map = False
 
     # Create iterables for map function
     n = len(scene_ids)
     options_list = [options] * n
     args = [*zip(options_list, scene_ids)]
-    nav_testing(*args[0], dynamic_scene, dino_extraction, save_data)
+    nav_testing(*args[0], dynamic_scene, dino_extraction, save_data, save_map)
     
     print("Now the pool is closed and no longer available")
 
