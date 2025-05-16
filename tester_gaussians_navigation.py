@@ -77,10 +77,7 @@ habitat_transform = np.array([
                         [0., 0., -1., 0.],
                         [0., 0., 0., 1.]
                     ])
-# habitat_transform = np.array([[1, 0, 0, 0,],
-#                              [0, 1, 0, 0],
-#                              [0, 0, 1, 0],
-#                              [0, 0, 0, 1]])
+
 
 np.random.seed(0)
 torch.random.manual_seed(0)
@@ -179,6 +176,7 @@ class NavTester(object):
     def __init__(self, options, scene_id, dynamic_scene, dino_extraction, save_data, save_map):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.options = options
+
         # Load config
         self.slam_config = get_cfg_defaults()
         self.slam_config.merge_from_file(options.slam_config)
@@ -221,16 +219,7 @@ class NavTester(object):
         # Save the run config file
         write_config_file = os.path.join(self.slam_config["workdir"], self.slam_config["run_name"], self.options.dataset_type, "config.yaml")
         shutil.copy(self.options.slam_config, write_config_file)
-        # if os.path.exists(write_config_file):
-        #     # if file already exists, then reload.
-        #     logger.info(f"loading existing config at {write_config_file}")
-        #     self.slam_config.merge_from_file(write_config_file)
-        #     self.slam_config["run_name"] = f"{self.scene_id}-{self.slam_config.run_name}"
-        # else:
-        #     # copy config file
-        #     shutil.copy(self.options.slam_config, write_config_file)
 
-        
         if self.options.max_steps != self.slam_config["num_frames"]:
             logger.warn(f"max_steps {self.options.max_steps} != self.slam_config['num_frames'] {self.slam_config['num_frames']}, override self.options")
             self.options.max_steps = self.slam_config["num_frames"]
@@ -255,10 +244,10 @@ class NavTester(object):
         self.options.turn_angle = self.slam_config["turn_angle"]
         self.options.occupancy_height_thresh = self.slam_config["policy"]["occupancy_height_thresh"]
 
-        self.test_ds = HabitatDataScene(self.options, config_file=config_file, slam_config=self.slam_config, scene_id=self.scene_id, dynamic=dynamic_scene)
+        self.habitat_ds = HabitatDataScene(self.options, config_file=config_file, slam_config=self.slam_config, scene_id=self.scene_id, dynamic=dynamic_scene)
 
         self.step_count = 0
-        self.min_depth, self.max_depth = self.test_ds.min_depth, self.test_ds.max_depth
+        self.min_depth, self.max_depth = self.habitat_ds.min_depth, self.habitat_ds.max_depth
         self.policy_name = self.slam_config["policy"]["name"]
         print(">> Policy name: ", self.policy_name)
 
@@ -290,12 +279,13 @@ class NavTester(object):
 
         # Dynamic Object initialization
         if self.dynamic_scene:
-            self.camera_forward_offset = [-2.0, 0.0, -1.0]
+            # self.camera_forward_offset = [-2.0, 0.0, -1.0]
+            self.camera_forward_offset = [-1.0, 0.0, -1.0]
             self.sim_obj = self.initialize_dynamic_object("habitat_example_objects_0.2/space_robot", self.camera_forward_offset)
     
     def initialize_dynamic_object(self, path_obj, camera_forward_offset, scale_factor=0.4):
-        obj_templates_mgr = self.test_ds.sim._sim.get_object_template_manager()
-        rigid_obj_mgr = self.test_ds.sim._sim.get_rigid_object_manager()
+        obj_templates_mgr = self.habitat_ds.sim._sim.get_object_template_manager()
+        rigid_obj_mgr = self.habitat_ds.sim._sim.get_rigid_object_manager()
         # template_file_path = os.path.join(self.options.root_path, "habitat_example_objects_0.2/car")
         template_file_path = os.path.join(self.options.root_path, path_obj)
         scale_factor = scale_factor
@@ -313,7 +303,7 @@ class NavTester(object):
         new_obj.motion_type = habitat_sim.physics.MotionType.KINEMATIC
         # self.default_agent = self.sim._sim.get_agent(0)
         # self.rigid_obj.motion_type = habitat_sim.physics.MotionType.DYNAMIC   # It moves the object from the initial position (it cannot fly because the dynamic is enabled and it falls down)
-        agent_node = self.test_ds.sim._sim.agents[0].scene_node
+        agent_node = self.habitat_ds.sim._sim.agents[0].scene_node
         # Place object 1.0 meter in front of the camera
           # -Z is forward in Habitat-Sim
         object_position = agent_node.transformation.transform_point(camera_forward_offset)
@@ -406,32 +396,23 @@ class NavTester(object):
 
         fx, fy = intrinsics[0, 0], intrinsics[1, 1]
         cx, cy = intrinsics[0, 2], intrinsics[1, 2]
-        # 1. Crea maschera valida: oggetto visibile E depth > 0
         valid_mask = (object_mask_bw > 0) & (depth > 0)
         ys, xs = np.where(valid_mask)
         if len(ys) == 0:
-            print("No valid object points in this frame.")
             return
 
-        # 2. Estrai depth e colori corrispondenti
         zs = depth[ys, xs]
         xs_cam = (xs - cx) * zs / fx
         ys_cam = (ys - cy) * zs / fy
         points_cam = np.stack([xs_cam, ys_cam, zs], axis=1)
 
-        # 3. Trasforma camera → world
         points_hom = np.concatenate([points_cam, np.ones((points_cam.shape[0], 1))], axis=1)  # (N, 4)
         points_world = (camera_pose @ points_hom.T).T[:, :3]
 
-        # 4. Trasforma world → oggetto
         T_world_object = np.linalg.inv(object_pose)
         points_obj = (T_world_object @ np.concatenate([points_world, np.ones((points_world.shape[0], 1))], axis=1).T).T[:, :3]
 
-        # 5. Colori
         colors = rgb[ys, xs].astype(np.float32) / 255.0
-
-        print("PTS shape: ", points_obj.shape)
-        print("COLORS shape: ", colors.shape)
 
         filtered_points = points_obj
         filtered_colors = colors
@@ -447,17 +428,15 @@ class NavTester(object):
 
         # Add to global map
         self.global_obj_pcd += filtered_pcd
-        print("Global point cloud size after adding: ", len(self.global_obj_pcd.points))
 
         save_path = os.path.join(self.policy_eval_dir, f"pointcloud/global_pcl_obj_{step}.ply")
         o3d.io.write_point_cloud(save_path, self.global_obj_pcd)
-        print("Saved object point cloud to: ", save_path)
 
 
     @torch.no_grad()
     def test_gaussians_navigation(self):
-        self.test_ds.sim.sim.reset()
-        agent_node = self.test_ds.sim._sim.agents[0].scene_node
+        self.habitat_ds.sim.sim.reset()
+        agent_node = self.habitat_ds.sim._sim.agents[0].scene_node
 
         object_position = agent_node.transformation.transform_point(self.camera_forward_offset)
         self.sim_obj.set_translation(object_position)
@@ -465,19 +444,19 @@ class NavTester(object):
         # self.sim_obj.set_rotation(rotation_90_y)
 
         episode = None
-        observations_cpu = self.test_ds.sim.sim.get_sensor_observations()
+        observations_cpu = self.habitat_ds.sim.sim.get_sensor_observations()
         observations = {"rgb": torch.from_numpy(observations_cpu["rgb"]).cuda(), "depth": torch.from_numpy(observations_cpu["depth"]).cuda(), "semantic": torch.from_numpy(observations_cpu["semantic"]).cuda()}
         img = observations['rgb'][:, :, :3]
-        depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
-        semantic = observations['semantic'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
+        depth = observations['depth'].reshape(1, self.habitat_ds.img_size[0], self.habitat_ds.img_size[1])
 
         # Get Camera to World transform
-        c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
+        c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
         c2w_t = torch.from_numpy(c2w).float().cuda()
         w2c_t = torch.linalg.inv(c2w_t)
         # resume SLAM system if neededs
         slam = GaussianSLAM(self.slam_config)
         slam.init(img, depth, w2c_t)
+
         # load from existing weights
         weight_files = glob.glob(os.path.join(slam.eval_dir, "params*.npz"))
         if len(weight_files) > 0:
@@ -490,14 +469,14 @@ class NavTester(object):
 
         if slam.cur_frame_idx > 0:
             c2w = slam.get_latest_frame()
-            set_agent_state(self.test_ds.sim.sim, c2w)
+            set_agent_state(self.habitat_ds.sim.sim, c2w)
 
         # reset agent from TrajReader
         if self.policy_name == "TrajReader":
-            set_agent_state(self.test_ds.sim.sim, np.concatenate([self.traj_poses[t, :3], self.traj_poses[t, 3:]]))
-        init_c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
+            set_agent_state(self.habitat_ds.sim.sim, np.concatenate([self.traj_poses[t, :3], self.traj_poses[t, 3:]]))
+        init_c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
 
-        intrinsics = torch.linalg.inv(self.test_ds.inv_K).cuda()
+        intrinsics = torch.linalg.inv(self.habitat_ds.inv_K).cuda()
         print("Intrinsics: ", intrinsics)
         self.abs_poses = []
 
@@ -505,7 +484,7 @@ class NavTester(object):
         action_queue = self.init_local_policy(slam, init_c2w, intrinsics, episode)
 
         agent_episode_distance = 0.0 # distance covered by agent at any given time in the episode
-        previous_pos = self.test_ds.sim.sim.get_agent_state().position
+        previous_pos = self.habitat_ds.sim.sim.get_agent_state().position
 
         planned_path = None
         goal_pose = None
@@ -515,7 +494,7 @@ class NavTester(object):
             os.makedirs(os.path.join(self.policy_eval_dir, "rgb"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "rgb_mask"), exist_ok=True)
             # os.makedirs(os.path.join(self.policy_eval_dir, "depth"), exist_ok=True)
-            # os.makedirs(os.path.join(self.policy_eval_dir, "semantic"), exist_ok=True)
+            os.makedirs(os.path.join(self.policy_eval_dir, "semantic"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "bw_mask"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "pointcloud"), exist_ok=True)
 
@@ -536,7 +515,7 @@ class NavTester(object):
             while t <= self.options.max_steps:
                 print(f"##### NAVIGATION STEP: {t} #####")
                 img = observations['rgb'][:, :, :3]
-                depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])                
+                depth = observations['depth'].reshape(1, self.habitat_ds.img_size[0], self.habitat_ds.img_size[1])                
                 if self.dynamic_scene:
                     dt = 0.1
                     current_pos = np.array(self.sim_obj.get_translation())
@@ -544,17 +523,15 @@ class NavTester(object):
                     rotation = self.sim_obj.obj.rotation
                     global_velocity = rotation.transform_vector(local_velocity)
                     next_pose = current_pos + dt*global_velocity
-                    is_valid = self.test_ds.sim.sim.pathfinder.is_navigable(next_pose)
+                    is_valid = self.habitat_ds.sim.sim.pathfinder.is_navigable(next_pose)
                     self.sim_obj.moving_forward_and_back(is_valid)
                    
-                camera_pose = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
-                # print("Camera pose: ", camera_pose)
+                camera_pose = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
 
                 object_pose = self.sim_obj.get_transformation() @ habitat_transform
                 object_pose = np.array(object_pose)
-                # print("Object pose: ", object_pose)
 
-                observations_cpu = self.test_ds.sim.sim.get_sensor_observations()
+                observations_cpu = self.habitat_ds.sim.sim.get_sensor_observations()
                 rgb_bgr = cv2.cvtColor(observations_cpu["rgb"], cv2.COLOR_RGB2BGR)
                 depth_vis_gray = (observations_cpu["depth"] / 10.0 * 255).astype(np.uint8)
                 depth_raw = (observations_cpu["depth"])
@@ -563,7 +540,8 @@ class NavTester(object):
                 semantic_vis = d3_40_colors_rgb[semantic_obs_uint8]
 
                 if self.dynamic_scene:
-                    # print("Semantic ID: ", self.sim_obj.get_semantic_id())
+                    print("Semantic ID: ", self.sim_obj.get_semantic_id())
+                    print("Np unique semantic obs: ", np.unique(np.array(observations_cpu["semantic"])))
                     object_mask = (observations_cpu["semantic"] == self.sim_obj.get_semantic_id()).astype(np.uint8) * 255
                     object_mask_bw = cv2.cvtColor(object_mask, cv2.COLOR_GRAY2BGR)
                     if np.array(object_mask_bw).ndim == 3:
@@ -606,7 +584,7 @@ class NavTester(object):
                 self.store_filtered_pointcloud(rgb_bgr, depth_raw, intrinsics, camera_pose, keep_ratio=0.05, step=t)
                 
 
-                c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
+                c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
 
                 c2w_t = torch.from_numpy(c2w).float().cuda()
                 w2c_t = torch.linalg.inv(c2w_t)
@@ -622,20 +600,20 @@ class NavTester(object):
                     cm.requeue()
                 
                 # 3d info
-                agent_pose, agent_height = utils.get_sim_location(agent_state=self.test_ds.sim.sim.get_agent_state())
+                agent_pose, agent_height = utils.get_sim_location(agent_state=self.habitat_ds.sim.sim.get_agent_state())
                 self.abs_poses.append(agent_pose)
 
                 # Update habitat vis tool and save the current state
                 if self.save_map:
                     if t % 5 == 0:
                         if self.dynamic_scene:
-                            self.habvis.save_vis_seen(self.test_ds.sim.sim, t, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
+                            self.habvis.save_vis_seen(self.habitat_ds.sim.sim, t, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
                         else:
-                            self.habvis.save_vis_seen(self.test_ds.sim.sim, t)
+                            self.habvis.save_vis_seen(self.habitat_ds.sim.sim, t)
 
-                    self.habvis.update_fow_sim(self.test_ds.sim.sim)
+                    self.habvis.update_fow_sim(self.habitat_ds.sim.sim)
                     if self.dynamic_scene:
-                        self.habvis.update_obj_sim(self.test_ds.sim.sim, self.sim_obj)
+                        self.habvis.update_obj_sim(self.habitat_ds.sim.sim, self.sim_obj)
                 
                 # save habvis
                 if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0:
@@ -742,14 +720,14 @@ class NavTester(object):
                     pos = self.traj_poses[t, :3]
                     quat = self.traj_poses[t, 3:]
 
-                    set_agent_state(self.test_ds.sim.sim, np.concatenate([pos, quat]))
+                    set_agent_state(self.habitat_ds.sim.sim, np.concatenate([pos, quat]))
 
                     observations = None
-                    observations = self.test_ds.sim.sim.get_sensor_observations()
+                    observations = self.habitat_ds.sim.sim.get_sensor_observations()
                     observations = {"rgb": torch.from_numpy(observations["rgb"]).cuda(), "depth": torch.from_numpy(observations["depth"]).cuda()}
 
                     # estimate distance covered by agent
-                    current_pos = self.test_ds.sim.sim.get_agent_state().position
+                    current_pos = self.habitat_ds.sim.sim.get_agent_state().position
                     agent_episode_distance += utils.euclidean_distance(current_pos, previous_pos)
                     previous_pos = current_pos
                     t+=1
@@ -826,9 +804,9 @@ class NavTester(object):
                 
                 # Apply next action
                 # depth is [0, 1] (should be rescaled to 10)
-                prev_pos = self.test_ds.sim.sim.get_agent_state().position
-                self.test_ds.sim.sim.step(action_id)
-                current_pos = self.test_ds.sim.sim.get_agent_state().position
+                prev_pos = self.habitat_ds.sim.sim.get_agent_state().position
+                self.habitat_ds.sim.sim.step(action_id)
+                current_pos = self.habitat_ds.sim.sim.get_agent_state().position
                 # function to check if the agent is stuck
                 if isinstance(self.policy, AstarPlanner) and action_id == 1 \
                     and np.max(np.abs(prev_pos - current_pos)) < 1e-3:
@@ -855,7 +833,7 @@ class NavTester(object):
                         action_id = action_queue.get()
                 
                 # get new observation
-                observations = self.test_ds.sim.sim.get_sensor_observations()
+                observations = self.habitat_ds.sim.sim.get_sensor_observations()
                 observations = {"rgb": torch.from_numpy(observations["rgb"]).cuda(), "depth": torch.from_numpy(observations["depth"]).cuda()}
 
                 # if slam.config.Training.pose_filter:
@@ -884,14 +862,14 @@ class NavTester(object):
             wandb.finish()
         
         # Close current scene
-        self.test_ds.sim.sim.close()
+        self.habitat_ds.sim.sim.close()
         # slam.frontend.backend_queue.put(["stop"])
         slam.stop()
 
     
     def uniform_rand_poses(self):
-        agent_pose, agent_height = utils.get_sim_location(agent_state=self.test_ds.sim.sim.get_agent_state())
-        scene_bounds_lower, scene_bounds_upper = self.test_ds.sim.sim.pathfinder.get_bounds()
+        agent_pose, agent_height = utils.get_sim_location(agent_state=self.habitat_ds.sim.sim.get_agent_state())
+        scene_bounds_lower, scene_bounds_upper = self.habitat_ds.sim.sim.pathfinder.get_bounds()
 
         # Generate Random poses
         test_size = int(2e3)
@@ -900,7 +878,7 @@ class NavTester(object):
         candidate_pos[:, 0] = rng.uniform(scene_bounds_lower[0], scene_bounds_upper[0], (test_size, ))
         candidate_pos[:, 2] = rng.uniform(scene_bounds_lower[2], scene_bounds_upper[2], (test_size, ))
         candidate_pos[:, 1] = agent_height
-        valid_index = list(map(self.test_ds.sim.sim.pathfinder.is_navigable, candidate_pos))
+        valid_index = list(map(self.habitat_ds.sim.sim.pathfinder.is_navigable, candidate_pos))
         valid_index = np.array(valid_index)
         
         valid_pos = candidate_pos[valid_index]
@@ -922,9 +900,9 @@ class NavTester(object):
         
         # PSNR Evaluation
         metrics = {"psnr": [], "depth_mae": [], "ssim": [], "lpips": []}
-        init_agent_state = self.test_ds.sim.sim.get_agent_state()
-        agent_pose, agent_height = utils.get_sim_location(agent_state=self.test_ds.sim.sim.get_agent_state())
-        scene_bounds_lower, scene_bounds_upper = self.test_ds.sim.sim.pathfinder.get_bounds()
+        init_agent_state = self.habitat_ds.sim.sim.get_agent_state()
+        agent_pose, agent_height = utils.get_sim_location(agent_state=self.habitat_ds.sim.sim.get_agent_state())
+        scene_bounds_lower, scene_bounds_upper = self.habitat_ds.sim.sim.pathfinder.get_bounds()
         valid_pos, random_quat = self.uniform_rand_poses()
 
         cal_lpips = LearnedPerceptualImagePatchSimilarity(
@@ -942,13 +920,13 @@ class NavTester(object):
         poses_stats = []
 
         for test_id, (pos, quat) in tqdm(enumerate(zip(valid_pos, random_quat))):
-            set_agent_state(self.test_ds.sim.sim, np.concatenate([pos, quat]))
+            set_agent_state(self.habitat_ds.sim.sim, np.concatenate([pos, quat]))
 
-            observations = self.test_ds.sim.sim.get_sensor_observations()
+            observations = self.habitat_ds.sim.sim.get_sensor_observations()
             observations = {"rgb": torch.from_numpy(observations["rgb"]).cuda(), "depth": torch.from_numpy(observations["depth"]).cuda()}
 
             # render at position 
-            c2w = utils.get_cam_transform(agent_state=self.test_ds.sim.sim.get_agent_state()) @ habitat_transform
+            c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
             c2w_t = torch.from_numpy(c2w).float().cuda()
 
             with torch.no_grad():
@@ -967,7 +945,7 @@ class NavTester(object):
                 depth = render_pkg["depth"]
 
             rgb_gt = observations['rgb'][:, :, :3].permute(2, 0, 1) / 255
-            depth_gt = observations['depth'].reshape(self.test_ds.img_size[0], self.test_ds.img_size[1], 1).permute(2, 0, 1)
+            depth_gt = observations['depth'].reshape(self.habitat_ds.img_size[0], self.habitat_ds.img_size[1], 1).permute(2, 0, 1)
 
             color_8bit = color.permute(1, 2, 0).cpu().numpy() * 255
             name = "{:06d}.png".format(int(EIG.item() * 1e4))
@@ -1009,7 +987,7 @@ class NavTester(object):
         known_area = torch.tensor(self.habvis.fow_mask).int()
         coord = 0 if known_area.shape[0] < known_area.shape[1] else 1
         meter_per_pixel = min(abs(scene_bounds_upper[c*2] - scene_bounds_lower[c*2]) / known_area.shape[c] for c in [0,1])
-        _, semantic_map = draw_map(self.test_ds.sim.sim, agent_height, meter_per_pixel, use_sim=True, map_res=known_area.shape[coord])
+        _, semantic_map = draw_map(self.habitat_ds.sim.sim, agent_height, meter_per_pixel, use_sim=True, map_res=known_area.shape[coord])
         gt_know = (semantic_map == 1).astype(np.uint8)
 
         print("gt_know_area_shape: ", gt_know.shape, "known_area_shape: ", known_area.shape)
@@ -1036,7 +1014,7 @@ class NavTester(object):
         logger.info(output.replace("\n", "\t"))
 
         meter_per_pixel = 0.05
-        top_down_map, _ = draw_map(self.test_ds.sim.sim, agent_height, meter_per_pixel)
+        top_down_map, _ = draw_map(self.habitat_ds.sim.sim, agent_height, meter_per_pixel)
         cmap = mpl.colormaps["plasma"]
         for pos, psnr in zip(valid_pos, metrics["psnr"]):
             color = list(map(lambda x: int(x * 255), cmap(psnr / 20)[:3]))
@@ -1063,7 +1041,7 @@ class NavTester(object):
         map_filename = os.path.join(self.policy_eval_dir, "top_down_eval_viz.png")
         imageio.imsave(map_filename, top_down_map)
 
-        self.test_ds.sim.sim.agents[0].set_state(init_agent_state)
+        self.habitat_ds.sim.sim.agents[0].set_state(init_agent_state)
         # Close current scene
 
     @staticmethod
@@ -1071,8 +1049,8 @@ class NavTester(object):
         set_agent_state(sim, c2w)
 
         observations = sim.get_sensor_observations()
-        # sim_obs = self.test_ds.sim.sim.get_sensor_observations()
-        # observations = self.test_ds.sim.sim._sensor_suite.get_observations(sim_obs)
+        # sim_obs = self.habitat_ds.sim.sim.get_sensor_observations()
+        # observations = self.habitat_ds.sim.sim._sensor_suite.get_observations(sim_obs)
         image_size = observations["rgb"].shape[:2]  
 
         color = observations["rgb"][:, :, :3].permute(2, 0, 1) / 255
@@ -1082,11 +1060,11 @@ class NavTester(object):
     
     def add_pose_noise(self, rel_pose, action_id):
         if action_id == 1:
-            x_err, y_err, o_err = self.test_ds.sensor_noise_fwd.sample()[0][0]
+            x_err, y_err, o_err = self.habitat_ds.sensor_noise_fwd.sample()[0][0]
         elif action_id == 2:
-            x_err, y_err, o_err = self.test_ds.sensor_noise_left.sample()[0][0]
+            x_err, y_err, o_err = self.habitat_ds.sensor_noise_left.sample()[0][0]
         elif action_id == 3:
-            x_err, y_err, o_err = self.test_ds.sensor_noise_right.sample()[0][0]
+            x_err, y_err, o_err = self.habitat_ds.sensor_noise_right.sample()[0][0]
         else:
             x_err, y_err, o_err = 0., 0., 0.
         rel_pose[0,0] += x_err*self.options.noise_level
@@ -1145,7 +1123,7 @@ class NavTester(object):
             for cur_uni_pos, cur_uni_quat in tqdm(random.sample(list(zip(uiform_positions, uiform_quants)), \
                                                                 self.cfg.num_uniform_H_train), 
                                                                 desc="Computing uniformH_train"):
-                cur_uni_w2c = pos_quant2w2c(cur_uni_pos, cur_uni_quat, self.test_ds.sim.sim.get_agent_state())
+                cur_uni_w2c = pos_quant2w2c(cur_uni_pos, cur_uni_quat, self.habitat_ds.sim.sim.get_agent_state())
 
                 cur_H = slam.compute_Hessian(cur_uni_w2c, random_gaussian_params=random_gaussian_params, return_points=True, return_pose=False)
                 H_train = H_train + cur_H if H_train is not None else cur_H.detach().clone()
@@ -1399,16 +1377,16 @@ class NavTester(object):
             curr_w2c[:3, 3] = curr_cam_tran
 
             curr_c2w = torch.linalg.inv(curr_w2c)
-            set_agent_state(self.test_ds.sim.sim, curr_c2w)
+            set_agent_state(self.habitat_ds.sim.sim, curr_c2w)
 
             observations = None
-            observations = self.test_ds.sim.sim.get_sensor_observations()
+            observations = self.habitat_ds.sim.sim.get_sensor_observations()
             observations = {"rgb": torch.from_numpy(observations["rgb"]).cuda(), "depth": torch.from_numpy(observations["depth"]).cuda()}
-            # sim_obs = self.test_ds.sim.get_sensor_observations()
-            # observations = self.test_ds.sim._sensor_suite.get_observations(sim_obs)
+            # sim_obs = self.habitat_ds.sim.get_sensor_observations()
+            # observations = self.habitat_ds.sim._sensor_suite.get_observations(sim_obs)
 
             color = observations["rgb"][:, :, :3].permute(2, 0, 1) / 255
-            depth = observations['depth'].reshape(self.test_ds.img_size[0], self.test_ds.img_size[1], 1)
+            depth = observations['depth'].reshape(self.habitat_ds.img_size[0], self.habitat_ds.img_size[1], 1)
 
             if t in slam.keyframe_time_indices:
                 # depth = utils.unnormalize_depth(depth.clone(), min=self.min_depth, max=self.max_depth)
@@ -1419,7 +1397,7 @@ class NavTester(object):
 
             # Update UPEN
             if self.slam_config["policy"]["name"] == "UPEN":
-                agent_pose, y_height = utils.get_sim_location(agent_state=self.test_ds.sim.get_agent_state())
+                agent_pose, y_height = utils.get_sim_location(agent_state=self.habitat_ds.sim.get_agent_state())
                 self.abs_poses.append(agent_pose)
 
                 self.policy.predict_action(t, self.abs_poses, depth) 
@@ -1453,14 +1431,14 @@ class NavTester(object):
                 t = slam.cur_frame_idx
             else:
                 # turn around for initialization
-                init_scan_steps = 20 if not self.options.debug else 2
+                init_scan_steps = 72 if not self.options.debug else 2
                 # for k in range(2):
                 for k in range(init_scan_steps):
                     action_queue.put(2)
             # action_queue = queue.Queue(maxsize=self.slam_config["policy"]["planning_queue_size"])
         
         elif self.policy_name == "UPEN":
-            self.policy.init(self.test_ds, episode)
+            self.policy.init(self.habitat_ds, episode)
 
             if slam.cur_frame_idx > 0:
                 slam.pause()
@@ -1471,14 +1449,14 @@ class NavTester(object):
 
                 for curr_w2c in tqdm(traj, desc="Loading Traj ..."):
                     curr_c2w = np.linalg.inv(curr_w2c)
-                    set_agent_state(self.test_ds.sim.sim, curr_c2w)
+                    set_agent_state(self.habitat_ds.sim.sim, curr_c2w)
 
                     observations = None
-                    observations = self.test_ds.sim.sim.get_sensor_observations()
+                    observations = self.habitat_ds.sim.sim.get_sensor_observations()
                     observations = {"rgb": torch.from_numpy(observations["rgb"]).cuda(), "depth": torch.from_numpy(observations["depth"]).cuda()}
-                    depth = observations['depth'].reshape(1, self.test_ds.img_size[0], self.test_ds.img_size[1])
+                    depth = observations['depth'].reshape(1, self.habitat_ds.img_size[0], self.habitat_ds.img_size[1])
 
-                    agent_pose, y_height = utils.get_sim_location(agent_state=self.test_ds.sim.sim.get_agent_state())
+                    agent_pose, y_height = utils.get_sim_location(agent_state=self.habitat_ds.sim.sim.get_agent_state())
                     self.abs_poses.append(agent_pose)
                     self.policy.predict_action(t, self.abs_poses, depth) 
                     t += 1
@@ -1489,9 +1467,9 @@ class NavTester(object):
         self.habvis.reset()
         habvis_size = 768 if not hasattr(self, "policy") else self.policy.grid_dim[0]
         if self.dynamic_scene:
-            self.habvis.set_map(self.test_ds.sim.sim, habvis_size, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
+            self.habvis.set_map(self.habitat_ds.sim.sim, habvis_size, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
         else:
-            self.habvis.set_map(self.test_ds.sim.sim, habvis_size)
+            self.habvis.set_map(self.habitat_ds.sim.sim, habvis_size)
         # load from checkpoint
         if slam.cur_frame_idx > 0:
             folder = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))

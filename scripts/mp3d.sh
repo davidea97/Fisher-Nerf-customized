@@ -3,10 +3,10 @@ DATADIR=../data/versioned_data/
 
 
 # HM3D scenes
-DATASET="hm3d"
-DATASET_SPLIT="minival"
-# SCENES=("00800-TEEsavR23oF" "00802-wcojb4TFT35")
-SCENES=("00802-wcojb4TFT35")
+# DATASET="hm3d"
+# DATASET_SPLIT="minival"
+# # SCENES=("00800-TEEsavR23oF" "00802-wcojb4TFT35")
+# SCENES=("00802-wcojb4TFT35")
 
 # Gibson scenes
 # DATASET="gibson"
@@ -16,10 +16,10 @@ SCENES=("00802-wcojb4TFT35")
 
 
 # MP3D scenes
-# DATASET="MP3D"
-# DATASET_SPLIT="train"
-# # SCENES=("GdvgFV5R1Z5" "gZ6f7yhEvPG" "HxpKQynjfin" "pLe4wQe7qrG" "YmJkqBEsHnH")
-# SCENES=("gZ6f7yhEvPG")
+DATASET="MP3D"
+DATASET_SPLIT="train"
+# SCENES=("GdvgFV5R1Z5" "gZ6f7yhEvPG" "HxpKQynjfin" "pLe4wQe7qrG" "YmJkqBEsHnH")
+SCENES=("YmJkqBEsHnH")
 
 # Test
 # SCENES=("00800-TEEsavR23oF")

@@ -87,7 +87,8 @@ class HabitatDataScene(Dataset):
         if options.dataset_type == "MP3D":
             scene_name = scene_id.split('-')[1] if '-' in scene_id else scene_id
             cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id, scene_id + '.glb')
-            # cfg.habitat.simulator.scene_dataset = os.path.join(options.root_path, options.dataset_type, "mp3d_annotated_basis.scene_dataset_config.json")
+            cfg.habitat.simulator.scene_dataset = os.path.join(options.root_path, options.dataset_type, "mp3d_annotated_basis.scene_dataset_config.json")
+            print("CFG dataset: ", cfg.habitat.simulator.scene_dataset)
 
         elif options.dataset_type == "gibson":
             cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id + '.glb')

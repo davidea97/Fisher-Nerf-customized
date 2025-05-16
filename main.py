@@ -28,7 +28,6 @@ if __name__ == '__main__':
     __spec__ = None
     options = TrainOptions().parse_args()
     options.dataset_type = options.dataset
-    print("Options dataset split: ", options.dataset_split)
     options.config_val_file = os.path.join("configs", f"my_pointnav_{options.dataset.lower()}_val.yaml")
     scene_ids = options.scenes_list
     dynamic_scene = True
