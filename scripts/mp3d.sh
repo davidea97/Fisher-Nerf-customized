@@ -19,7 +19,7 @@ DATADIR=../data/versioned_data/
 DATASET="MP3D"
 DATASET_SPLIT="train"
 # SCENES=("GdvgFV5R1Z5" "gZ6f7yhEvPG" "HxpKQynjfin" "pLe4wQe7qrG" "YmJkqBEsHnH")
-SCENES=("YmJkqBEsHnH")
+SCENES=("GdvgFV5R1Z5")
 
 # Test
 # SCENES=("00800-TEEsavR23oF")

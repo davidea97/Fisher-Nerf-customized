@@ -20,9 +20,9 @@ sys.path.append(habitat_root)
 from train_options import TrainOptions
 from tester_gaussians_navigation import NavTester
 
-def nav_testing(options, scene_id, dynamic_scene=False, dino_extraction=False, save_data=False, save_map=False):
-    tester = NavTester(options, scene_id, dynamic_scene, dino_extraction, save_data, save_map)
-    tester.test_gaussians_navigation()
+def nav_testing(options, scene_id, dynamic_scene=False, dino_extraction=False, save_data=False, save_map=False, gaussian_optimization=False):
+    tester = NavTester(options, scene_id, dynamic_scene, dino_extraction, save_data, save_map, gaussian_optimization)
+    tester.test_navigation()
 
 if __name__ == '__main__':
     __spec__ = None
@@ -33,13 +33,14 @@ if __name__ == '__main__':
     dynamic_scene = True
     dino_extraction = False
     save_data = True
-    save_map = False
+    save_map = True
+    gaussian_optimization = True
 
     # Create iterables for map function
     n = len(scene_ids)
     options_list = [options] * n
     args = [*zip(options_list, scene_ids)]
-    nav_testing(*args[0], dynamic_scene, dino_extraction, save_data, save_map)
+    nav_testing(*args[0], dynamic_scene, dino_extraction, save_data, save_map, gaussian_optimization)
     
     print("Now the pool is closed and no longer available")
 

@@ -389,7 +389,7 @@ class GaussianSLAM:
             config
         """
         # Camera intrinsics
-        print("Config: ", config)
+        # print("Config: ", config)
         calibration = config["SLAM"]["Dataset"]["Calibration"]
         print("Calibration: ", calibration)
         # Camera prameters
@@ -588,7 +588,6 @@ class GaussianSLAM:
             do_continue_slam = False
             num_iters_tracking = self.config['tracking']['num_iters']
             progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
-            print("Evaluation dir: ", self.eval_dir)
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame

@@ -10,7 +10,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from typing import Callable, List
 from models.SLAM.utils.slam_external import build_rotation
-
+import time
 import datasets.util.map_utils as map_utils
 
 from .planning_utils import color_mapping_3, heatmap, LocalizationError, combimed_heuristic
@@ -667,7 +667,7 @@ class AstarPlanner:
 
         return poses, scores, random_gaussian_params
 
-    def global_planning_frontier(self, expansion=1, visualize=True, 
+    def global_planning_frontier(self, goal_proposal_fn:Callable = None, expansion=1, visualize=True, 
                         agent_pose=None, last_goal = None, slam=None):
         """ 
         Global Planning for next target goal 
@@ -678,12 +678,16 @@ class AstarPlanner:
         """
         # build frontiers
         print(">> Generate possible candidate pose")
-     
         candidate_pos, free_space = self.build_frontiers(None)
         use_frontier = candidate_pos is not None
     
         # generate random gaussians
         random_gaussian_params = None
+
+        # # propose goals when no frontiers exist
+        if candidate_pos is None and goal_proposal_fn is not None:
+            # propose goals
+            candidate_pos = goal_proposal_fn(self.K, self.cam_height)
 
         # extract goals
         candidate_pose = []
@@ -695,6 +699,7 @@ class AstarPlanner:
                 candidate_pos = torch.mean(candidate_pos, dim=0, keepdim=True)
 
             # sample poses
+            generate_candidate_time = time.time()
             while len(candidate_pose) == 0:
                 candidate_pose = self.generate_candidate(candidate_pos, expansion)
                 # expand the radius
@@ -712,11 +717,14 @@ class AstarPlanner:
                     eroded_free_space = torch.from_numpy(eroded_free_space).cuda()
                     free_pose = eroded_free_space[candidate_xy[:, 1], candidate_xy[:, 0]]
                     candidate_pose = candidate_pose[free_pose]
+            # print("Generate candidate time: ", time.time() - generate_candidate_time)
         print("Candidate pose: ", len(candidate_pose))
         
+        evaluate_time = time.time()
         scores, poses = self.pose_eval(candidate_pose)
-        
+        print("Pose evaluation time: ", time.time() - evaluate_time)
         #visualize
+        visualization_time = time.time()
         if visualize:
             occ_map = self.occ_map.argmax(0) == 1
             binarymap = occ_map.cpu().numpy().astype(np.uint8)
@@ -753,7 +761,7 @@ class AstarPlanner:
 
             plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
             plt.close()
-
+        print("Visualization time: ", time.time() - visualization_time)
         # and we only select the TOP 50 points
         topk = 20
         sort_index = torch.argsort(scores, descending=True)

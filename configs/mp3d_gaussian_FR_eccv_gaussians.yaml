@@ -4,13 +4,13 @@ run_name: results
 
 # planning parameters
 policy: 
-  name: astar_greedy
+  name: gaussians_based
   planning_queue_size: 30
 
 use_wandb: True
 
 H_reg_lambda: 0.000001
-num_frames: &total_frames 2000
+num_frames: &total_frames 100
 checkpoint_interval: 1000
 # number of keyframes for local mapping
 forward_step_size: 0.065
