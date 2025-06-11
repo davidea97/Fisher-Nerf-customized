@@ -291,7 +291,6 @@ def add_new_gaussians(config, params, variables, curr_data, sil_thres,
                     add_rand_gaussians = True, downsample_pcd = 1):
     """ Add new gaussians based """
     # Silhouette Rendering
-    print("PARAMS")
     transformed_pts = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
                                                                  transformed_pts)

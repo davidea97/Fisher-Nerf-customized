@@ -25,10 +25,13 @@ class UPEN:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.config = config
         self.eval_dir = os.path.join(self.config["workdir"], self.config["run_name"])
-
+        print("Ensamble dir: ", self.options.ensemble_dir)
         ensemble_exp = [i for i in os.listdir(self.options.ensemble_dir) if i.startswith('resnet')] # ensemble_dir should be a dir that holds multiple experiments
         ensemble_exp.sort() # in case the models are numbered put them in order
+        # ensemble_exp = ["ckpt/gibson-4plus-mp3d-train-val-test-resnet50.pth"]
         self.models_dict = {} # keys are the ids of the models in the ensemble
+        print("Ensamble exp: ", ensemble_exp)
+        print("Ensemble experiments: ", self.options.ensemble_size)
         for n in range(self.options.ensemble_size):
             self.models_dict[n] = {'predictor_model': get_predictor_from_options(self.options)}
             self.models_dict[n] = {k:v.to(self.device) for k,v in self.models_dict[n].items()}
@@ -37,6 +40,8 @@ class UPEN:
             self.models_dict[n]['predictor_model'] = nn.DataParallel(self.models_dict[n]['predictor_model'])
 
             checkpoint_dir = os.path.join(self.options.ensemble_dir, ensemble_exp[n])
+            print("Checkpoint dir: ", checkpoint_dir)
+            print("Contenuto:", os.listdir(checkpoint_dir))
             latest_checkpoint = tutils.get_latest_model(save_dir=checkpoint_dir)
             print("Model", n, "loading checkpoint", latest_checkpoint)
             self.models_dict[n] = tutils.load_model(models=self.models_dict[n], checkpoint_file=latest_checkpoint)

@@ -109,7 +109,7 @@ def get_latest_model(save_dir):
     checkpoint_list = []
     for dirpath, _, filenames in os.walk(save_dir):
         for filename in filenames:
-            if filename.endswith('.pt'):
+            if filename.endswith('.pt') or filename.endswith('.pth'):
                 checkpoint_list.append(os.path.abspath(os.path.join(dirpath, filename)))
     checkpoint_list = sorted(checkpoint_list)
     latest_checkpoint =  None if (len(checkpoint_list) is 0) else checkpoint_list[-1]

@@ -147,7 +147,7 @@ class TrainOptions(BaseOptions):
 
 
         # options relating to active training (using scenes dataloader)
-        self.parser.add_argument('--ensemble_size', type=int, dest='ensemble_size', default=4)
+        self.parser.add_argument('--ensemble_size', type=int, dest='ensemble_size', default=1)
 
         self.parser.add_argument('--root_path', type=str, dest='root_path', default="~/")
         self.parser.add_argument('--episodes_root', type=str, dest='episodes_root', default="")

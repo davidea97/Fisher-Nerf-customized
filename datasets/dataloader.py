@@ -91,7 +91,7 @@ class HabitatDataScene(Dataset):
             print("CFG dataset: ", cfg.habitat.simulator.scene_dataset)
 
         elif options.dataset_type == "gibson":
-            cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id + '.glb')
+            cfg.habitat.simulator.scene = os.path.join(options.root_path, options.dataset_type, scene_id, scene_id + '.glb')
         elif options.dataset_type == "replica":
             cfg.habitat.simulator.scene = os.path.join(options.root_path, "data/scene_datasets/",  options.scenes_dir,  scene_id, 'habitat/mesh_semantic.ply')
         elif options.dataset_type == "hm3d":

@@ -334,8 +334,8 @@ class AstarPlanner:
             return None, free_space
         
         # no dilation
-        # kernel = np.ones((3, 3), np.uint8)  
-        # frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
+        kernel = np.ones((3, 3), np.uint8)  
+        frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
         
         # store frontier
         # cv2.imwrite(os.path.join(self.eval_dir, "frontier_{}.png".format(self.frame_idx)), frontier.astype(np.uint8) * 255)
@@ -376,6 +376,7 @@ class AstarPlanner:
                 
                 frontier_distance = np.linalg.norm(frontier_pos - self.cam_pos, axis=1)
                 mean_distance = frontier_distance.mean()
+                # calculate area score size/distance
                 area_score = (count) / (mean_distance + 20)
 
                 if area_score > max_score:
@@ -466,9 +467,9 @@ class AstarPlanner:
                 p2 = path[idx + 1]
                 grid_img = cv2.line(grid_img, (p1[0], p1[1]), (p2[0], p2[1]), (191, 64, 191), 1)
 
-        plt.figure()
-        plt.imshow(grid_img)
-        plt.savefig(os.path.join(self.eval_dir, "occ_{}.png".format(self.frame_idx)))
+        # plt.figure()
+        # plt.imshow(grid_img)
+        # plt.savefig(os.path.join(self.eval_dir, "occ_{}.png".format(self.frame_idx)))
 
     def sample_random_candidate(self, agent_pos, free_space,
                                  sample_range = 1., sample_size:int = 100):
@@ -493,10 +494,10 @@ class AstarPlanner:
         # candidate_map_coord_z = ((random_pos[:, 2] - map_center[1]) / self.cell_size + self.grid_dim[1] // 2).astype(np.int32)
         
         free_space_erode = cv2.erode(free_space.astype(np.uint8), np.ones((11, 11), np.uint8))
-        plt.figure()
-        plt.imshow(free_space_erode)
-        plt.savefig(os.path.join(self.eval_dir, "freespace_erode_{}.png".format(self.frame_idx)))
-        plt.close()
+        # plt.figure()
+        # plt.imshow(free_space_erode)
+        # plt.savefig(os.path.join(self.eval_dir, "freespace_erode_{}.png".format(self.frame_idx)))
+        # plt.close()
 
         map_coord_z, map_coord_x = np.where(free_space_erode == 1)
         world_coord_z = (map_coord_z + 0.5 - self.grid_dim[1] // 2) * self.cell_size + map_center[1]
@@ -667,7 +668,7 @@ class AstarPlanner:
 
         return poses, scores, random_gaussian_params
 
-    def global_planning_frontier(self, goal_proposal_fn:Callable = None, expansion=1, visualize=True, 
+    def global_planning_frontier(self, expansion=1, visualize=True, 
                         agent_pose=None, last_goal = None, slam=None):
         """ 
         Global Planning for next target goal 
@@ -679,15 +680,20 @@ class AstarPlanner:
         # build frontiers
         print(">> Generate possible candidate pose")
         candidate_pos, free_space = self.build_frontiers(None)
+        # print("FRONTIERS BUILT: ", candidate_pos)
         use_frontier = candidate_pos is not None
-    
+        # this is frontier mode, return directly
+        # if pose_evaluation_fn is None and not use_frontier:
+        #     return None, None, None
+
+
         # generate random gaussians
         random_gaussian_params = None
 
         # # propose goals when no frontiers exist
-        if candidate_pos is None and goal_proposal_fn is not None:
-            # propose goals
-            candidate_pos = goal_proposal_fn(self.K, self.cam_height)
+        # if candidate_pos is None and goal_proposal_fn is not None:
+        #     # propose goals
+        #     candidate_pos = goal_proposal_fn(self.K, self.cam_height)
 
         # extract goals
         candidate_pose = []
@@ -699,7 +705,6 @@ class AstarPlanner:
                 candidate_pos = torch.mean(candidate_pos, dim=0, keepdim=True)
 
             # sample poses
-            generate_candidate_time = time.time()
             while len(candidate_pose) == 0:
                 candidate_pose = self.generate_candidate(candidate_pos, expansion)
                 # expand the radius
@@ -718,50 +723,58 @@ class AstarPlanner:
                     free_pose = eroded_free_space[candidate_xy[:, 1], candidate_xy[:, 0]]
                     candidate_pose = candidate_pose[free_pose]
             # print("Generate candidate time: ", time.time() - generate_candidate_time)
-        print("Candidate pose: ", len(candidate_pose))
+        # add uniformly sampled poses
+        if not use_frontier:
+            # random sampling     
+            random_pose = self.sample_random_candidate(agent_pose, free_space, sample_range=2 * expansion, sample_size=int(400*expansion))
+            if len(candidate_pose) == 0:
+                candidate_pose = random_pose
+            else:
+                candidate_pose = torch.cat([candidate_pose, random_pose], dim=0)
         
         evaluate_time = time.time()
         scores, poses = self.pose_eval(candidate_pose)
-        print("Pose evaluation time: ", time.time() - evaluate_time)
+        # print("Pose evaluation time: ", time.time() - evaluate_time)
         #visualize
         visualization_time = time.time()
-        if visualize:
-            occ_map = self.occ_map.argmax(0) == 1
-            binarymap = occ_map.cpu().numpy().astype(np.uint8)
+        # if visualize:
+        #     occ_map = self.occ_map.argmax(0) == 1
+        #     binarymap = occ_map.cpu().numpy().astype(np.uint8)
             
-            # dilate binary map
-            kernel = np.ones((3, 3), np.uint8)  
-            binarymap = cv2.dilate(binarymap, kernel)
+        #     # dilate binary map
+        #     kernel = np.ones((3, 3), np.uint8)  
+        #     binarymap = cv2.dilate(binarymap, kernel)
 
-            #to RGB
-            vis_map = np.zeros((binarymap.shape[0],binarymap.shape[1],3), np.uint8)
-            vis_map[:,:,0][binarymap!=0] = 255
-            vis_map[:,:,1][binarymap!=0] = 255
-            vis_map[:,:,2][binarymap!=0] = 255
+        #     #to RGB
+        #     vis_map = np.zeros((binarymap.shape[0],binarymap.shape[1],3), np.uint8)
+        #     vis_map[:,:,0][binarymap!=0] = 255
+        #     vis_map[:,:,1][binarymap!=0] = 255
+        #     vis_map[:,:,2][binarymap!=0] = 255
 
-            #frontiers
-            if self.frontier.sum() != 0:
-                frontier = self.frontier.copy()
-                frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
-                vis_map[:,:,0][frontier!=0] = 0
-                vis_map[:,:,1][frontier!=0] = 255
-                vis_map[:,:,2][frontier!=0] = 0
+        #     #frontiers
+        #     if self.frontier.sum() != 0:
+        #         frontier = self.frontier.copy()
+        #         frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
+        #         vis_map[:,:,0][frontier!=0] = 0
+        #         vis_map[:,:,1][frontier!=0] = 255
+        #         vis_map[:,:,2][frontier!=0] = 0
 
-            # candidate poses
-            normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
-            for score, pose in zip(normalized_scores, poses):
-                heatcolor = heatmap(score.item())[:3]
-                pt = self.convert_to_map([pose[0,3],pose[2,3]])
-                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
-                # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
+        #     # candidate poses
+        #     normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
+        #     for score, pose in zip(normalized_scores, poses):
+        #         heatcolor = heatmap(score.item())[:3]
+        #         pt = self.convert_to_map([pose[0,3],pose[2,3]])
+        #         vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+        #         # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
 
-            # agent position
-            pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
-            vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+        #     # agent position
+        #     pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
+        #     vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
 
-            plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
-            plt.close()
-        print("Visualization time: ", time.time() - visualization_time)
+        #     plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+        #     plt.close()
+
+        # print("Visualization time: ", time.time() - visualization_time)
         # and we only select the TOP 50 points
         topk = 20
         sort_index = torch.argsort(scores, descending=True)

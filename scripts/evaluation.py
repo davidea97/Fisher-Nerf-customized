@@ -20,10 +20,10 @@ rotation_90_x = np.array([
     [0., 0.,  0., 1.]
 ])
 
-def apply_transform_to_pointcloud(pc, transform):
+def apply_transform_to_pointcloud(pc, transform, scale=1.0):
     N = pc.shape[0]
     ones = torch.ones((N, 1), dtype=pc.dtype, device=pc.device)
-    pc_hom = torch.cat([pc, ones], dim=1)  # shape: (N, 4)
+    pc_hom = torch.cat([pc*scale, ones], dim=1)  # shape: (N, 4)
     transform_torch = torch.tensor(transform, dtype=pc.dtype, device=pc.device)
     pc_transformed = (transform_torch @ pc_hom.T).T[:, :3]  # (N, 3)
     return pc_transformed
@@ -55,6 +55,29 @@ def calculate_coverage_percentage(pc1, pc2, threshold=0.05, weight=1):
 #     print(f"{path} has {len(pcd.points)} points")
 #     return torch.from_numpy(np.asarray(pcd.points)).float()
 
+def get_latest_pcl_file(path_dir, obj= False):
+    import re
+    import os 
+
+    max_step = -1
+    latest_file = None
+
+    # Regular expression to extract step number
+    if obj:
+        pattern = re.compile(r"global_pcl_obj_(\d+)\.ply")
+    else:
+        pattern = re.compile(r"global_pcl_(\d+)\.ply")
+
+    for fname in os.listdir(path_dir):
+        match = pattern.match(fname)
+        if match:
+            step = int(match.group(1))
+            if step > max_step:
+                max_step = step
+                latest_file = os.path.join(path_dir, fname)
+
+    return latest_file
+
 def load_ply_pointcloud(path):
 
     scene = trimesh.load(path, force='scene', process=False)
@@ -72,12 +95,12 @@ def load_glb_pointcloud(path, num_points=100000):
     for geom in scene.geometry.values():
         vertices.append(geom.vertices)
     all_vertices = np.vstack(vertices)
-    # print(f"{path} has {all_vertices.shape[0]} points before sampling")
+    print(f"{path} has {all_vertices.shape[0]} points before sampling")
 
-    # if all_vertices.shape[0] > num_points:
-    #     indices = np.random.choice(all_vertices.shape[0], num_points, replace=False)
-    #     all_vertices = all_vertices[indices]
-        # print(f"Downsampled to {num_points} points")
+    if all_vertices.shape[0] > num_points:
+        indices = np.random.choice(all_vertices.shape[0], num_points, replace=False)
+        all_vertices = all_vertices[indices]
+        print(f"Downsampled to {num_points} points")
 
     return torch.from_numpy(all_vertices).float()
 
