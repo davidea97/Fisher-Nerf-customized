@@ -12,6 +12,7 @@ from typing import Callable, List
 from models.SLAM.utils.slam_external import build_rotation
 import time
 import datasets.util.map_utils as map_utils
+import math
 
 from .planning_utils import color_mapping_3, heatmap, LocalizationError, combimed_heuristic
 from .max_min_dist import select_maximin_points_vectorized, min_dist_center_approximate
@@ -423,7 +424,33 @@ class AstarPlanner:
         select_pixels = select_pixels[:, [1, 0]]
         select_pixels = (select_pixels - np.array([[self.grid_dim[0] // 2, self.grid_dim[1] // 2]])) * self.cell_size + map_center[None, :]
         
-        return select_pixels, free_space
+        # FBE LOGIC
+        if gaussian_points is None: 
+            
+            agent_pos = self.cam_pos  # expected in (x, z)
+            min_thresh = 0.5  # meters, adjust as needed
+
+            # Compute distances
+            distances = np.linalg.norm(select_pixels - agent_pos[None, :], axis=1)
+
+            # Find frontiers beyond threshold
+            valid_idx = np.where(distances >= min_thresh)[0]
+
+            if len(valid_idx) > 0:
+                # Pick the closest valid frontier
+                best_idx = valid_idx[np.argmin(distances[valid_idx])]
+                frontier_point = select_pixels[best_idx:best_idx+1]  # shape (1,2)
+            else:
+                # Fallback: go in opposite direction
+                print("No frontier beyond min_thresh. Going backward.")
+                angle = math.pi * 5/4
+                x, y = math.cos(angle), math.sin(angle)
+                opposite_dir = np.array([[-x, -y]]) * 0.5  # random_magnitude
+                frontier_point = agent_pos[None, :] + opposite_dir  # shape (1,2)
+        else:
+            frontier_point = select_pixels
+
+        return frontier_point, free_space
 
     def visualize_map(self, c2w, world_goal_point = None, path = None, global_path = None):
         prob, index = self.occ_map.max(dim=0)
@@ -680,6 +707,8 @@ class AstarPlanner:
         # build frontiers
         print(">> Generate possible candidate pose")
         candidate_pos, free_space = self.build_frontiers(None)
+        print("CANDIDATE POS: ", candidate_pos)
+        print("Type of candidate_pos: ", type(candidate_pos))
         # print("FRONTIERS BUILT: ", candidate_pos)
         use_frontier = candidate_pos is not None
         # this is frontier mode, return directly

@@ -961,7 +961,6 @@ class NavTester(object):
                     # current_agent_pose = slam.get_latest_frame()
                     current_agent_pos = current_agent_pose[:3, 3]
 
-
                     # update occlusion map
                     self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
                     # logger.info(f"Frame: {slam.cur_frame_idx} Mapping time: {time.time() - mapping_start:.5f}")

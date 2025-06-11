@@ -5,8 +5,8 @@ run_name: results
 # planning parameters
 policy: 
   # name: gaussians_based 
-  # name: frontier 
-  name: random_walk 
+  name: frontier 
+  # name: random_walk 
   # name: UPEN
   planning_queue_size: 30
 

@@ -12,9 +12,10 @@ DATADIR=../data/versioned_data/
 DATASET="gibson"
 DATASET_SPLIT="val"
 # SCENES=("Greigsville" "Denmark" "Cantwell" "Eudora" "Pablo" "Ribera" "Swormville" "Eastville" "Elmira")
-# SCENES=("Greigsville" "Denmark" "Eudora" "Pablo" "Ribera" "Elmira")
+SCENES=("Greigsville" "Denmark" "Eudora" "Pablo" "Ribera" "Elmira")
 # SCENES=("Cantwell" "Swormville" "Eastville")
-SCENES=("Pablo" "Ribera" "Elmira")
+SCENES=("Eudora" "Pablo" "Ribera" "Elmira")
+# SCENES=("Denmark")
 
 
 # MP3D scenes
