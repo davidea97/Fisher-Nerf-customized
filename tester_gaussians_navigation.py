@@ -289,7 +289,7 @@ class NavTester(object):
         # Dynamic Object initialization
         if self.dynamic_scene:
             # self.camera_forward_offset = [-2.0, 0.0, -1.0]
-            self.camera_forward_offset = [0.0, 1.0, -2.0]
+            self.camera_forward_offset = [0.0, 1.5, -1.0]
             self.dynamic_object_path = "habitat_example_objects_0.2/wheeled_robot"
             # find the glb file within the dynamic_object_path
             obj_glb_files = glob.glob(os.path.join(self.options.root_path, self.dynamic_object_path, "*.glb"))
@@ -441,8 +441,8 @@ class NavTester(object):
 
         return mask
 
-    def store_filtered_pointcloud(self, rgb, depth, intrinsics, pose, keep_ratio=0.05, step = None):
-
+    def store_filtered_pointcloud(self, rgb, depth, intrinsics, pose, keep_ratio=1, step = None):
+        # print("Intrinsics: ", intrinsics)
         filtered_pcd, pts, colors = self.backproj_depth_to_pcl(rgb, depth, intrinsics, pose, keep_ratio, step)
 
         pts_tensor = torch.from_numpy(pts).float()         # shape: (N, 3)
@@ -461,8 +461,8 @@ class NavTester(object):
         self.global_pcd += filtered_pcd
         # print("Global point cloud size after adding: ", len(self.global_pcd.points))
 
-        if step == self.options.max_steps -1 or (step + 1) % 10 == 0:
-            save_path = os.path.join(self.policy_eval_dir, f"pointcloud/global_pcl_{step+1}.ply")
+        if step == self.options.max_steps -1 or (step + 1) % 100 == 0:
+            save_path = os.path.join(self.policy_eval_dir, f"pointcloud/global_pcl_{step}.ply")
             o3d.io.write_point_cloud(save_path, self.global_pcd)
 
 
@@ -533,14 +533,35 @@ class NavTester(object):
                     sample_pos = pathfinder.get_random_navigable_point()
                     if sample_pos is not None:
                         object_position = sample_pos
+                        # Increase y coordinate to place the object above the ground
+                        # object_position[1] += 0.5  # Adjust height as needed
+                        print("Object position sampled:", object_position)
                         found = True
                         break
+
                 if not found:
                     raise RuntimeError("Couldn't find a random navigable point for the object.")
 
             # Snap the object position to the nearest navigable point
             ground_pos = mn.Vector3(*pathfinder.snap_point(object_position))
+
+            # Get bounding box height
+
+            object_height = 0.5
+            # Offset to place base of object just above ground
+            offset_y = object_height / 2.0 + 0.01  # + small epsilon to avoid z-fighting
+            ground_pos.y += offset_y
+
             self.sim_obj.set_translation(ground_pos)
+            # self.sim_obj.set_translation(ground_pos)
+            # angle_degrees = 90
+            # angle_radians = math.radians(angle_degrees)
+
+            # # Create rotation quaternion
+            # rotation = mn.Quaternion.rotation(mn.Rad(angle_radians), mn.Vector3(0, 1.0, 0))
+
+            # # Set rotation
+            # self.sim_obj.set_rotation(rotation)
 
         episode = None
         observations_cpu = self.habitat_ds.sim.sim.get_sensor_observations()
@@ -557,14 +578,17 @@ class NavTester(object):
         slam.init(img, depth, w2c_t)
 
         # load from existing weights
-        weight_files = glob.glob(os.path.join(slam.eval_dir, "params*.npz"))
-        if len(weight_files) > 0:
-            weight_files.sort(key=lambda x: int(x.split('/')[-1].split('.')[0][6:]))
-            weight_file = weight_files[-1]
-            self.load_3d_gaussian(slam, weight_file)
+        # weight_files = glob.glob(os.path.join(slam.eval_dir, "params*.npz"))
+        # if len(weight_files) > 0:
+        #     weight_files.sort(key=lambda x: int(x.split('/')[-1].split('.')[0][6:]))
+        #     weight_file = weight_files[-1]
+        #     self.load_3d_gaussian(slam, weight_file)
 
         # resume from slam
+        # DAVIDE
         t = slam.cur_frame_idx + 1
+        t = slam.cur_frame_idx
+
 
         if slam.cur_frame_idx > 0:
             c2w = slam.get_latest_frame()
@@ -576,7 +600,7 @@ class NavTester(object):
         init_c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
 
         intrinsics = torch.linalg.inv(self.habitat_ds.inv_K).cuda()
-        print("Intrinsics: ", intrinsics)
+        # print("Intrinsics: ", intrinsics)
         self.abs_poses = []
 
         # init local policy
@@ -592,11 +616,12 @@ class NavTester(object):
         if self.save_data:
             os.makedirs(os.path.join(self.policy_eval_dir, "rgb"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "rgb_mask"), exist_ok=True)
-            # os.makedirs(os.path.join(self.policy_eval_dir, "depth"), exist_ok=True)
+            os.makedirs(os.path.join(self.policy_eval_dir, "depth"), exist_ok=True)
+            os.makedirs(os.path.join(self.policy_eval_dir, "depth_vis"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "semantic"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "bw_mask"), exist_ok=True)
             os.makedirs(os.path.join(self.policy_eval_dir, "pointcloud"), exist_ok=True)
-
+            os.makedirs(os.path.join(self.policy_eval_dir, "camera_poses"), exist_ok=True)
 
          # === Load DINOv2 ===   
         if self.dino_extraction:
@@ -615,19 +640,23 @@ class NavTester(object):
             sequential_depth_obs = []
             sequential_camera_poses = []
             saved_camera_poses = []
+            robot_stuck_count = 0
             while t < self.options.max_steps:
                 print(f"##### NAVIGATION STEP: {t} #####")
                 img = observations['rgb'][:, :, :3]
                 depth = observations['depth'].reshape(1, self.habitat_ds.img_size[0], self.habitat_ds.img_size[1])
                                
                 if self.dynamic_scene:
-                    dt = 0.1
+                    dt = 0.2
                     current_pos = np.array(self.sim_obj.get_translation())
                     local_velocity = mn.Vector3(self.sim_obj.get_linear_velocity())
                     rotation = self.sim_obj.obj.rotation
                     global_velocity = rotation.transform_vector(local_velocity)
+
                     next_pose = current_pos + dt*global_velocity
+
                     is_valid = self.habitat_ds.sim.sim.pathfinder.is_navigable(next_pose)
+
                     # self.sim_obj.moving_forward_and_back(is_valid)
                     self.sim_obj.moving_randomly(is_valid)
                     object_pose = self.sim_obj.get_transformation() @ habitat_transform
@@ -734,9 +763,12 @@ class NavTester(object):
                 if self.save_data:
                     # save_path = os.path.join(self.policy_eval_dir, f"pointcloud/pcl_{t}.ply")
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb/rgb_{t}.png"), rgb_bgr)
-                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth/depth_{t}.png"), depth_vis)
+                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth_vis/depth_{t}.png"), depth_vis)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"semantic/semantic_{t}.png"), semantic_vis)
-
+                    # np.save(os.path.join(self.policy_eval_dir, f"depth/depth_map_{t}.npy"), depth_raw)
+                    np.save(os.path.join(self.policy_eval_dir, f"camera_poses/pose_{t}.npy"), camera_pose)
+                    depth_mm = (depth_raw * 1000).astype(np.uint16)
+                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth/depth_{t}.png"), depth_mm)
                     # save_pointcloud(rgb_bgr, depth_raw, intrinsics, pose, save_path, None)
 
                     # Save the video from images every #steps_numbers steps
@@ -747,15 +779,17 @@ class NavTester(object):
                             output_path=os.path.join(self.policy_eval_dir, "trajectory_rgb_video.mp4"),
                             fps=10
                         )
+           
+                rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+                self.store_filtered_pointcloud(rgb, depth_raw, intrinsics, camera_pose, keep_ratio=1.00, step=t)
 
-                self.store_filtered_pointcloud(rgb_bgr, depth_raw, intrinsics, camera_pose, keep_ratio=0.05, step=t)
-                
 
                 c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
-
+                # print("Camera to World transform: ", c2w)
                 c2w_t = torch.from_numpy(c2w).float().cuda()
                 w2c_t = torch.linalg.inv(c2w_t)
-
+                # print("Camera pose: ", camera_pose)
+                # print("C2W new: ", c2w)
                 if self.gaussian_optimization:
                     ate = slam.track_rgbd(img, depth, w2c_t, action_id)
 
@@ -801,6 +835,7 @@ class NavTester(object):
                         #     plt.imsave(os.path.join(self.policy_eval_dir, f"bev_{slam.cur_frame_idx}.png"), bev_render)
 
                     current_agent_pose = slam.get_latest_frame()
+                    print("Current agent pose: ", current_agent_pose)
                     current_agent_pos = current_agent_pose[:3, 3]
                     
                     # update occlusion map
@@ -902,9 +937,9 @@ class NavTester(object):
                         save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
                         self.policy.save(save_path)
 
-                    # current_agent_pose = slam.get_latest_frame()
-                    # current_agent_pos = current_agent_pose[:3, 3]
-                    
+                    current_agent_pose = slam.get_latest_frame()
+                    current_agent_pos = current_agent_pose[:3, 3]
+                    print("Current agent pose: ", current_agent_pose)
                     # mapping_start = time.time()
                     agent_state = self.habitat_ds.sim._sim.get_agent_state()
                     agent_rotation = agent_state.rotation  # quaternion: x, y, z, w
@@ -912,9 +947,9 @@ class NavTester(object):
 
                     quat = [agent_rotation.w, agent_rotation.x, agent_rotation.y, agent_rotation.z]  # w, x, y, z
                     rot_matrix = o3d.geometry.get_rotation_matrix_from_quaternion(quat)
-                    current_agent_pose = np.eye(4)
-                    current_agent_pose[:3, :3] = rot_matrix
-                    current_agent_pose[:3, 3] = agent_translation
+                    # current_agent_pose = np.eye(4)
+                    # current_agent_pose[:3, :3] = rot_matrix
+                    # current_agent_pose[:3, 3] = agent_translation
 
                     # current_agent_pose = slam.get_latest_frame()
                     current_agent_pos = current_agent_pose[:3, 3]
@@ -946,7 +981,10 @@ class NavTester(object):
 
                     # current_agent_pose = slam.get_latest_frame()
                     # current_agent_pos = current_agent_pose[:3, 3]
-                    
+                    current_agent_pose = camera_pose.copy()
+                    current_agent_pos = current_agent_pose[:3, 3]
+                    # print("Current agent pose: ", current_agent_pose)
+
                     # mapping_start = time.time()
                     agent_state = self.habitat_ds.sim._sim.get_agent_state()
                     agent_rotation = agent_state.rotation  # quaternion: x, y, z, w
@@ -954,13 +992,11 @@ class NavTester(object):
 
                     quat = [agent_rotation.w, agent_rotation.x, agent_rotation.y, agent_rotation.z]  # w, x, y, z
                     rot_matrix = o3d.geometry.get_rotation_matrix_from_quaternion(quat)
-                    current_agent_pose = np.eye(4)
-                    current_agent_pose[:3, :3] = rot_matrix
-                    current_agent_pose[:3, 3] = agent_translation
+                    current_agent_pose_new = np.eye(4)
+                    current_agent_pose_new[:3, :3] = rot_matrix
+                    current_agent_pose_new[:3, 3] = agent_translation
 
-                    # current_agent_pose = slam.get_latest_frame()
-                    current_agent_pos = current_agent_pose[:3, 3]
-
+                    # print("Current agent pose new: ", current_agent_pose_new)
                     # update occlusion map
                     self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
                     # logger.info(f"Frame: {slam.cur_frame_idx} Mapping time: {time.time() - mapping_start:.5f}")
@@ -977,14 +1013,14 @@ class NavTester(object):
                             # gaussian_points = slam.gaussian_points
                             # global plan -- select global 
                             # global_points, _, _ = \
-                            #         self.policy.global_planning(None, gaussian_points, 
+                            #         self.policy.global_planning(None, None, 
                             #                                     None, expansion, visualize=True, 
                             #                                     agent_pose=current_agent_pos)
                             global_points, _, _ = \
                                 self.policy.global_planning_frontier(expansion, visualize=True, 
                                                             agent_pose=current_agent_pos)
                             
-                            
+                            # print("Global points: ", global_points)
                             if global_points is None:
                                 raise NoFrontierError("No frontier found")
 
@@ -997,6 +1033,8 @@ class NavTester(object):
 
                             best_path = path_actions[0]
                             map_path = paths_arr[0]
+
+                            # print("Best path: ", best_path)
 
 
                         if best_path is None:
@@ -1033,6 +1071,7 @@ class NavTester(object):
                 # function to check if the agent is stuck
                 if isinstance(self.policy, AstarPlanner) and action_id == 1 \
                     and np.max(np.abs(prev_pos - current_pos)) < 1e-3:
+                    
                     # robot stuck
                     print("robot stuck, replan")
                     current_agent_pose = slam.get_latest_frame()
@@ -1054,6 +1093,11 @@ class NavTester(object):
                     logger.warn(" cannot move, clear action queue, replan! ")
                     while not action_queue.empty():
                         action_id = action_queue.get()
+                    
+                    robot_stuck_count += 1
+                    if robot_stuck_count > 10:
+                        print("Robot stuck for too long, exiting navigation loop")
+                        self.options.max_steps = t + 1
                 
                 # get new observation
                 observations = self.habitat_ds.sim.sim.get_sensor_observations()
@@ -1071,8 +1115,7 @@ class NavTester(object):
                     self.eval_navigation(slam, t)
 
             poses_np = np.stack(saved_camera_poses, axis=0)  # shape: (N, 4, 4)
-            np.save(os.path.join(self.policy_eval_dir, "camera_poses.npy"), poses_np)
-
+            
         except NoFrontierError as e:
             print("No frontier found, exiting navigation loop")
             pass
@@ -1121,11 +1164,11 @@ class NavTester(object):
         else:
             raise FileNotFoundError("No valid global_pcl_*.ply file found.")
         
-        save_pointcloud_as_ply(est_3d_reconstruction, os.path.join(self.policy_eval_dir, "original_est_scene_ply.ply"))
+        # save_pointcloud_as_ply(est_3d_reconstruction, os.path.join(self.policy_eval_dir, "original_est_scene_ply.ply"))
         est_3d_rotated = apply_transform_to_pointcloud(est_3d_reconstruction, habitat_transform)
         save_pointcloud_as_ply(est_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_est_scene_ply.ply"))
 
-        save_pointcloud_as_ply(gt_3d_reconstruction, os.path.join(self.policy_eval_dir, "original_gt_scene_glb.ply"))
+        # save_pointcloud_as_ply(gt_3d_reconstruction, os.path.join(self.policy_eval_dir, "original_gt_scene_glb.ply"))
         gt_3d_rotated = apply_transform_to_pointcloud(gt_3d_reconstruction, rotation_90_x)
         save_pointcloud_as_ply(gt_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_gt_scene_pcl.ply"))
 
@@ -1157,16 +1200,16 @@ class NavTester(object):
                 raise FileNotFoundError("No valid global_pcl_*.ply file found.")
             # est_obj_3d_reconstruction = load_ply_pointcloud(os.path.join(self.policy_eval_dir, "pointcloud", "global_pcl_{}.ply".format(self.options.max_steps)))
             
-            save_pointcloud_as_ply(est_obj_3d_reconstruction, "original_ply.ply")
+            # save_pointcloud_as_ply(est_obj_3d_reconstruction, "original_ply.ply")
             est_obj_3d_rotated = apply_transform_to_pointcloud(est_obj_3d_reconstruction, habitat_transform)
-            save_pointcloud_as_ply(est_obj_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_ply.ply"))
+            save_pointcloud_as_ply(est_obj_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_est_obj.ply"))
 
-            save_pointcloud_as_ply(gt_obj_3d_reconstruction, "original_glb.ply")
+            # save_pointcloud_as_ply(gt_obj_3d_reconstruction, "original_glb.ply")
             gt_obj_3d_rotated = apply_transform_to_pointcloud(gt_obj_3d_reconstruction, rotation_m90_x, scale=OBJ_SCALE_FACTOR)
-            save_pointcloud_as_ply(gt_obj_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_pcl.ply"))
+            save_pointcloud_as_ply(gt_obj_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_gt_obj.ply"))
 
-            acc, comp, ratio = accuracy_comp_ratio_from_pcl(gt_obj_3d_rotated, est_obj_3d_rotated, dist_th=0.05)
-            iacc, icomp, iratio = accuracy_comp_ratio_from_pcl(est_obj_3d_rotated, gt_obj_3d_rotated, dist_th=0.05)
+            acc, comp, ratio = accuracy_comp_ratio_from_pcl(gt_obj_3d_rotated, est_obj_3d_rotated, dist_th=0.01)
+            iacc, icomp, iratio = accuracy_comp_ratio_from_pcl(est_obj_3d_rotated, gt_obj_3d_rotated, dist_th=0.01)
 
             print(f"ACC (dist): {acc*100:.2f} cm, Completeness (dist): {comp*100:.2f} cm, Completeness (ratio): {ratio*100:.2f} %, FPR: {(1-iratio)*100:.2f} %")
             with open(os.path.join(self.policy_eval_dir, f"{self.policy_name}_results.txt"), "a") as f:
@@ -1441,6 +1484,7 @@ class NavTester(object):
         
         # global plan -- select global 
         pose_proposal_fn = None if not hasattr(slam, "pose_proposal") else getattr(slam, "pose_proposal")
+        print("Pose proposal function: ", pose_proposal_fn)
         global_points, EIGs, random_gaussian_params = \
             self.policy.global_planning(slam.pose_eval, gaussian_points, pose_proposal_fn, \
                                         expansion=expansion, visualize=True, \
@@ -1581,7 +1625,7 @@ class NavTester(object):
         self.policy.setup_start(start, gaussian_points, t)
 
         for pose_np in tqdm(global_points, desc="Action Planning"):
-            
+            # print("Planning for pose: ", pose_np)
             if cm.should_exit():
                 cm.requeue()
 
@@ -1589,6 +1633,7 @@ class NavTester(object):
             pos_np[1] = current_agent_pos[1] # set the same heights
 
             finish = self.policy.convert_to_map(pos_np[[0, 2]])[[1, 0]] # convert to z-x
+            # print("Finish: ", finish)
             paths = self.policy.planning(finish) # A* Planning in [x, z]
 
             if len(paths) == 0:
@@ -1611,7 +1656,7 @@ class NavTester(object):
             stage_goal_w = np.array([stage_goal_w[0], future_pose[1, 3], stage_goal_w[1], 1])
             path_action = []
             generate_opposite_turn = False
-
+            # print("Stage goal: ", stage_goal, "Stage goal world: ", stage_goal_w)
             # push actions to queue
             while len(path_action) < self.slam_config["policy"]["planning_queue_size"]:
                 # compute action
@@ -1767,7 +1812,7 @@ class NavTester(object):
                 t = slam.cur_frame_idx
             else:
                 # turn around for initialization # Usually 72 steps
-                init_scan_steps = 36 if not self.options.debug else 2
+                init_scan_steps = 2 if not self.options.debug else 2
                 # for k in range(2):
                 for k in range(init_scan_steps):
                     action_queue.put(2)

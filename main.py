@@ -34,7 +34,7 @@ if __name__ == '__main__':
     dynamic_scene_rec = True
     dino_extraction = False
     save_data = True
-    save_map = False
+    save_map = True
     gaussian_optimization = False
 
     # Create iterables for map function

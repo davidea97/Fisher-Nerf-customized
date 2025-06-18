@@ -113,3 +113,4 @@ explore:
   shortcut_path: True
   add_random_gaussians: True
   frontier_select_method: "combined"
+  # frontier_select_method: "closest"

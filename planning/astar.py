@@ -17,6 +17,7 @@ import math
 from .planning_utils import color_mapping_3, heatmap, LocalizationError, combimed_heuristic
 from .max_min_dist import select_maximin_points_vectorized, min_dist_center_approximate
         
+from frontier_exploration.frontier_search import FrontierSearch
 
 class AstarPlanner:
     def __init__(self, 
@@ -692,7 +693,7 @@ class AstarPlanner:
 
         # log the topk candidates
         self.previous_candidates = poses
-
+        print("Poses: ", poses.shape, "Scores: ", scores.shape)
         return poses, scores, random_gaussian_params
 
     def global_planning_frontier(self, expansion=1, visualize=True, 
@@ -766,42 +767,42 @@ class AstarPlanner:
         # print("Pose evaluation time: ", time.time() - evaluate_time)
         #visualize
         visualization_time = time.time()
-        # if visualize:
-        #     occ_map = self.occ_map.argmax(0) == 1
-        #     binarymap = occ_map.cpu().numpy().astype(np.uint8)
+        if visualize:
+            occ_map = self.occ_map.argmax(0) == 1
+            binarymap = occ_map.cpu().numpy().astype(np.uint8)
             
-        #     # dilate binary map
-        #     kernel = np.ones((3, 3), np.uint8)  
-        #     binarymap = cv2.dilate(binarymap, kernel)
+            # dilate binary map
+            kernel = np.ones((3, 3), np.uint8)  
+            binarymap = cv2.dilate(binarymap, kernel)
 
-        #     #to RGB
-        #     vis_map = np.zeros((binarymap.shape[0],binarymap.shape[1],3), np.uint8)
-        #     vis_map[:,:,0][binarymap!=0] = 255
-        #     vis_map[:,:,1][binarymap!=0] = 255
-        #     vis_map[:,:,2][binarymap!=0] = 255
+            #to RGB
+            vis_map = np.zeros((binarymap.shape[0],binarymap.shape[1],3), np.uint8)
+            vis_map[:,:,0][binarymap!=0] = 255
+            vis_map[:,:,1][binarymap!=0] = 255
+            vis_map[:,:,2][binarymap!=0] = 255
 
-        #     #frontiers
-        #     if self.frontier.sum() != 0:
-        #         frontier = self.frontier.copy()
-        #         frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
-        #         vis_map[:,:,0][frontier!=0] = 0
-        #         vis_map[:,:,1][frontier!=0] = 255
-        #         vis_map[:,:,2][frontier!=0] = 0
+            #frontiers
+            if self.frontier.sum() != 0:
+                frontier = self.frontier.copy()
+                frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
+                vis_map[:,:,0][frontier!=0] = 0
+                vis_map[:,:,1][frontier!=0] = 255
+                vis_map[:,:,2][frontier!=0] = 0
 
-        #     # candidate poses
-        #     normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
-        #     for score, pose in zip(normalized_scores, poses):
-        #         heatcolor = heatmap(score.item())[:3]
-        #         pt = self.convert_to_map([pose[0,3],pose[2,3]])
-        #         vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
-        #         # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
+            # candidate poses
+            normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
+            for score, pose in zip(normalized_scores, poses):
+                heatcolor = heatmap(score.item())[:3]
+                pt = self.convert_to_map([pose[0,3],pose[2,3]])
+                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+                # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
 
-        #     # agent position
-        #     pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
-        #     vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+            # agent position
+            pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
+            vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
 
-        #     plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
-        #     plt.close()
+            # plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+            # plt.close()
 
         # print("Visualization time: ", time.time() - visualization_time)
         # and we only select the TOP 50 points
@@ -897,9 +898,11 @@ class AstarPlanner:
 
     def planning(self, goal):
         # check goal first
+        # print(">> Planning for goal: ", goal)
         if self.occ_map_np[goal[0], goal[1]]:
+            print("Goal is occupied, cannot plan.")
             return np.array([])
-
+        
         dist_to_goal_map = np.ones_like(self.occ_map_np, dtype=np.float32) * -1
 
         visited_node_y, visited_node_x = np.where(self.planning_direction[..., 1] >= 0)
@@ -928,6 +931,7 @@ class AstarPlanner:
         max_iter = 1e4
         curr_iter = 0
         # A star searching
+        # print(">> Start A* search")
         while curr_iter < max_iter:
             if len(frontiers) == 0:
                 break
@@ -1034,13 +1038,16 @@ class AstarPlanner:
 
         # No valid path
         if self.planning_direction[goal[0], goal[1], 0] < 0:
+            print("No valid path found to the goal.")
             return np.array([])
 
         # generate path
         path = [goal]
         while True:
+
             parent = self.planning_direction[path[-1][0], path[-1][1], 1:].astype(np.int32)
             if parent[0] == path[-1][0] and parent[1] == path[-1][1]:
+                # print("Reached the start point.")
                 break
             path.append([parent[0], parent[1]])
         
@@ -1069,7 +1076,7 @@ class AstarPlanner:
             # # add the goal point
             shortcut_path.append(paths[-1])
             paths = np.stack(shortcut_path, axis=0)
-        
+        # print("Path found: ", paths.shape)
         return paths
 
     def CheckCollision(self, pt1, pt2, occ_map):

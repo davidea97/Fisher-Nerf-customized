@@ -9,20 +9,21 @@ DATADIR=../data/versioned_data/
 # SCENES=("00802-wcojb4TFT35")
 
 # Gibson scenes
-DATASET="gibson"
-DATASET_SPLIT="val"
-# SCENES=("Greigsville" "Denmark" "Cantwell" "Eudora" "Pablo" "Ribera" "Swormville" "Eastville" "Elmira")
-SCENES=("Greigsville" "Denmark" "Eudora" "Pablo" "Ribera" "Elmira")
-# SCENES=("Cantwell" "Swormville" "Eastville")
-SCENES=("Eudora" "Pablo" "Ribera" "Elmira")
-# SCENES=("Denmark")
+# DATASET="gibson"
+# DATASET_SPLIT="val"
+# # SCENES=("Greigsville" "Denmark" "Cantwell" "Eudora" "Pablo" "Ribera" "Swormville" "Eastville" "Elmira")
+# SCENES=("Greigsville" "Denmark" "Eudora" "Pablo" "Ribera" "Elmira")
+# SCENES=("Denmark" "Eudora" "Pablo" "Ribera" "Elmira")
+# # SCENES=("Cantwell" "Swormville" "Eastville")
+# # SCENES=("Ribera" "Elmira")
+# SCENES=("Eudora")
 
 
 # MP3D scenes
-# DATASET="MP3D"
-# DATASET_SPLIT="train"
-# # SCENES=("GdvgFV5R1Z5" "gZ6f7yhEvPG" "HxpKQynjfin" "pLe4wQe7qrG" "YmJkqBEsHnH")
-# SCENES=("GdvgFV5R1Z5")
+DATASET="MP3D"
+DATASET_SPLIT="train"
+# SCENES=("GdvgFV5R1Z5" "gZ6f7yhEvPG" "HxpKQynjfin" "pLe4wQe7qrG" "YmJkqBEsHnH")
+SCENES=("GdvgFV5R1Z5")
 
 # Test
 # SCENES=("00800-TEEsavR23oF")

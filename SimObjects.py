@@ -9,8 +9,8 @@ class SimObject:
         self.show_object_axes = show_object_axes
         self.is_rotating = False
         self.accumulated_rotation = 0.0  
-        self.rotation_step = np.pi / 30
-        self.obj_linear_velocity = np.array([0.0, 0.0, 3.0])
+        self.rotation_step = np.pi / 18
+        self.obj_linear_velocity = np.array([0.0, 0.0, 2.0])
         self.show_object_axes = False
         self.linear_speed = speed
 
@@ -87,7 +87,7 @@ class SimObject:
                 self.is_rotating = True 
             else:
                 self.enable_kinematic_velocity(self.get_linear_velocity().tolist(), [0.0, 0.0, 0.0])
-
+    
     def moving_randomly(self, is_valid):
         if self.is_rotating:
             self.enable_kinematic_velocity([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
@@ -96,11 +96,11 @@ class SimObject:
             self.obj.rotation = delta_quat * current_rot
             self.accumulated_rotation += self.get_rotation_step()
 
-            if self.get_accumulated_rotation() >= np.pi:
+            if self.get_accumulated_rotation() >= np.pi/2:
                 self.is_rotating = False
                 self.accumulated_rotation = 0.0
                 
-                theta = random.uniform(0, np.pi)  # angle in radians
+                theta = random.uniform(-np.pi/4, np.pi/4)  # angle in radians
                 direction = np.array([np.cos(theta), 0.0, np.sin(theta)])
                 speed = self.get_linear_speed()  # or define a constant
                 velocity = direction * speed
