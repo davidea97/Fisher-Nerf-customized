@@ -191,6 +191,7 @@ class NavTester(object):
         self.dino_extraction = dino_extraction
         self.save_data = save_data
         self.save_map = save_map
+        self.object_tracking = False
 
         self.gaussian_optimization = gaussian_optimization
 
@@ -547,7 +548,7 @@ class NavTester(object):
 
             # Get bounding box height
 
-            object_height = 0.5
+            object_height = 0.6
             # Offset to place base of object just above ground
             offset_y = object_height / 2.0 + 0.01  # + small epsilon to avoid z-fighting
             ground_pos.y += offset_y
@@ -685,57 +686,6 @@ class NavTester(object):
                     if np.array(object_mask_bw).ndim == 3:
                         object_mask_bw = object_mask_bw[:, :, 0]
                     
-                    # # Predict the object mask 
-                    # sequential_rgb_obs.append(rgb_bgr)
-                    # sequential_depth_obs.append(depth_raw) 
-                    # sequential_camera_poses.append(camera_pose)
-
-                    # # Remove old observation if more than 2
-                    # if len(sequential_rgb_obs) > 2:
-                    #     sequential_rgb_obs.pop(0)
-                    #     sequential_depth_obs.pop(0)
-                    #     sequential_camera_poses.pop(0)
-                    # if t > 1: # we need to start with the first frame
-                    #     # print("Sequential RGB obs shape: ", len(sequential_rgb_obs))
-                    #     # Store the current and the last observation
-                    #     prev_rgb = sequential_rgb_obs[-2]
-                    #     prev_depth = sequential_depth_obs[-2]
-                    #     prev_camera_pose = sequential_camera_poses[-2]
-                    #     curr_rgb = sequential_rgb_obs[-1]
-                    #     curr_depth = sequential_depth_obs[-1]
-                    #     curr_camera_pose = sequential_camera_poses[-1]
-
-                    #     prev_pcd, _, _ = self.backproj_depth_to_pcl(prev_rgb, prev_depth, intrinsics, camera_pose, keep_ratio=0.05)
-                    #     curr_pcd, _, _ = self.backproj_depth_to_pcl(curr_rgb, curr_depth, intrinsics, np.eye(4), keep_ratio=0.05)
-
-                    #     # Transform the prev pcd to the current camera pose
-                    #     prev_pcd.transform(np.linalg.inv(curr_camera_pose))
-                        
-                    #     # Save the two pcds
-                    #     prev_pcd_path = os.path.join(self.policy_eval_dir, f"pointcloud/prev_pcd_{t}.ply")
-                    #     curr_pcd_path = os.path.join(self.policy_eval_dir, f"pointcloud/curr_pcd_{t}.ply")
-                    #     o3d.io.write_point_cloud(prev_pcd_path, prev_pcd)
-                    #     o3d.io.write_point_cloud(curr_pcd_path, curr_pcd)
-
-                    #     # Convert to numpy
-                    #     prev_points = np.asarray(prev_pcd.points)  # shape: (N,3)
-                    #     curr_kdtree = o3d.geometry.KDTreeFlann(curr_pcd)
-
-                    #     # For each point in prev_pcd, find its nearest neighbor in curr_pcd
-                    #     dynamic_mask = np.zeros(len(prev_points), dtype=bool)
-                    #     threshold = 0.05  # meters
-
-                    #     for i, point in enumerate(prev_points):
-                    #         [_, idx, dist] = curr_kdtree.search_knn_vector_3d(point, 1)
-                    #         if dist[0] > threshold**2:
-                    #             dynamic_mask[i] = True
-
-                    #     # Select dynamic 3D points
-                    #     dynamic_points = prev_points[dynamic_mask]
-                        
-                    #     # Project to image space
-                    #     dynamic_mask_img = self.project_points(dynamic_points, intrinsics, curr_rgb.shape[0], curr_rgb.shape[1])
-
                     # Save the object mask if and only if it is not empty
                     if np.any(object_mask_bw!=0):
                         # cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_rend_{t}.png"), mask)
@@ -783,7 +733,6 @@ class NavTester(object):
                 rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
                 self.store_filtered_pointcloud(rgb, depth_raw, intrinsics, camera_pose, keep_ratio=1.00, step=t)
 
-
                 c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
                 # print("Camera to World transform: ", c2w)
                 c2w_t = torch.from_numpy(c2w).float().cuda()
@@ -822,244 +771,218 @@ class NavTester(object):
                         os.makedirs(save_path)
                     self.habvis.save(save_path)
 
-                if self.policy_name == "gaussians_based":
-                    if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0:
-                        save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
-                        self.policy.save(save_path)
-                    
-                        bev_render_pkg = self.policy.render_bev(slam)
-                        bev_render = bev_render_pkg['render'].cpu().numpy().transpose(1, 2, 0)  # Convert to HWC format if necessary
-                        bev_render = (bev_render.clip(0., 1.) * 255).astype(np.uint8).copy()
-                        # cv2.imwrite(os.path.join(self.policy_eval_dir, f"bev_{slam.cur_frame_idx}.png"), bev_render)
-                        # if self.save_data:
-                        #     plt.imsave(os.path.join(self.policy_eval_dir, f"bev_{slam.cur_frame_idx}.png"), bev_render)
+                # Analyze which kind of policy we use
+                threshold = 0
+                object_detected = np.sum(object_mask_bw)
+                if object_detected > threshold:
+                    print(">> Start object tracking and reconstruction")
+                    self.object_tracking = True
+                else:
+                    self.object_tracking = False
 
-                    current_agent_pose = slam.get_latest_frame()
-                    print("Current agent pose: ", current_agent_pose)
-                    current_agent_pos = current_agent_pose[:3, 3]
-                    
-                    # update occlusion map
-                    self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
-
-                    # logger.info(f"frame: {slam.cur_frame_idx} Mapping time: {time.time() - mapping_start:.5f}")
-                    best_goal = None
-                    best_map_path = None
-                    best_path = None
-                    best_global_path = None
-
-                    while action_queue.empty():
-                        # pause backend during evaluation
-                        slam.pause()
-
-                        if expansion > 10:
-                            # replan 10 times, wrong, exit
-                            raise NoFrontierError()
+                if not self.object_tracking:   
+                    if self.policy_name == "gaussians_based":
+                        if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0:
+                            save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
+                            self.policy.save(save_path)
                         
-                        try:
-                        # while best_path is None:
-                            # Moved path logics to a function to avoid nightmare indentation
-                            def render_topdown_view(cams, slam: GaussianSLAM):
-                                from scipy.spatial.transform import Rotation as SciR
-                                bev_c2w = torch.tensor([[1., 0., 0., 0.],
-                                                        [0., 0., -1., 0.],
-                                                        [0., 1., 0., 0.],
-                                                        [0., 0., 0., 1.]]).float().cuda()
-                                bev_c2w[:3, 3] = c2w[:3, 3]
-                                bev_c2w[1, 3] += 10.
-                                xyz = slam.get_gaussian_xyz()
-                                bev_mask = xyz[:, 1] < 0.5
-                                t = slam.render_at_pose(bev_c2w.cuda(), white_bg=True, mask=bev_mask)
-                                plt.imsave("./experiments/debug_render-mask.png", t["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
+                            bev_render_pkg = self.policy.render_bev(slam)
+                            bev_render = bev_render_pkg['render'].cpu().numpy().transpose(1, 2, 0)  # Convert to HWC format if necessary
+                            bev_render = (bev_render.clip(0., 1.) * 255).astype(np.uint8).copy()
+                            # cv2.imwrite(os.path.join(self.policy_eval_dir, f"bev_{slam.cur_frame_idx}.png"), bev_render)
+                            # if self.save_data:
+                            #     plt.imsave(os.path.join(self.policy_eval_dir, f"bev_{slam.cur_frame_idx}.png"), bev_render)
 
-                            # breakpoint()
-                            print(">> Planning the best path")
-                            plan_path_time = time.time()
-                            best_path, best_map_path, best_goal, best_world_path, \
-                                best_global_path, global_points, EIGs = self.plan_best_path(slam, current_agent_pose, expansion, t, goal_pose)
-                            # print("Planning time: ", time.time() - plan_path_time)
-                            if best_path is None:
-                                logger.warn(f"time_step {t}, no valid path found, re-plan")
-                                continue
-                        except PruneException as e:
-                            logger.info(" Too many invisible points, replan ... ")
-                            continue
-
-                        if best_path is None:
-                            print("No best path! Turning")
-                            expansion += 1
-                            if not action_queue.full():
-                                action_queue.put(2)
-                        else:
-                            expansion = 1
-                            # Fill into action queue
-                            print(best_path)
-                            for action_id in best_path:
-                                if not action_queue.full():
-                                    action_queue.put(action_id)
-                                else:
-                                    break
-                    
-                        slam.resume()
-
-                        # visualize map
-                        # self.policy.visualize_map(c2w, best_goal, best_map_path, best_global_path)
-
-                        goal_pose = best_goal
-                    
-                    action_id = action_queue.get()
-                    # time.sleep(1.)
-
-                elif self.policy_name == "UPEN":
-                    action_id, finish = self.policy.predict_action(t, self.abs_poses, depth)    
-                    if finish:
-                        t += 1
-                        break
-
-                elif self.policy_name == "TrajReader":
-                    pos = self.traj_poses[t, :3]
-                    quat = self.traj_poses[t, 3:]
-
-                    set_agent_state(self.habitat_ds.sim.sim, np.concatenate([pos, quat]))
-
-                    observations = None
-                    observations = self.habitat_ds.sim.sim.get_sensor_observations()
-                    observations = {"rgb": torch.from_numpy(observations["rgb"]).cuda(), "depth": torch.from_numpy(observations["depth"]).cuda()}
-
-                    # estimate distance covered by agent
-                    current_pos = self.habitat_ds.sim.sim.get_agent_state().position
-                    agent_episode_distance += utils.euclidean_distance(current_pos, previous_pos)
-                    previous_pos = current_pos
-                    t+=1
-                    continue
-                
-                elif self.policy_name == "random_walk":
-                    if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0 :
-                        save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
-                        self.policy.save(save_path)
-
-                    current_agent_pose = slam.get_latest_frame()
-                    current_agent_pos = current_agent_pose[:3, 3]
-                    print("Current agent pose: ", current_agent_pose)
-                    # mapping_start = time.time()
-                    agent_state = self.habitat_ds.sim._sim.get_agent_state()
-                    agent_rotation = agent_state.rotation  # quaternion: x, y, z, w
-                    agent_translation = agent_state.position
-
-                    quat = [agent_rotation.w, agent_rotation.x, agent_rotation.y, agent_rotation.z]  # w, x, y, z
-                    rot_matrix = o3d.geometry.get_rotation_matrix_from_quaternion(quat)
-                    # current_agent_pose = np.eye(4)
-                    # current_agent_pose[:3, :3] = rot_matrix
-                    # current_agent_pose[:3, 3] = agent_translation
-
-                    # current_agent_pose = slam.get_latest_frame()
-                    current_agent_pos = current_agent_pose[:3, 3]
-
-
-                    # update occlusion map
-                    self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
-                    # logger.info(f"Frame: {slam.cur_frame_idx} Mapping time: {time.time() - mapping_start:.5f}")
-                    
-                    # self.policy.visualize_map(c2w)
-                    while action_queue.empty():
-                        # pause backend during evaluation
-                        slam.pause()
-                        # Randomly select an action in [1, 2, 3]
-                        action_id = np.random.choice([1, 2, 3])
-                        action_queue.put(action_id)
+                        current_agent_pose = slam.get_latest_frame()
+                        print("Current agent pose: ", current_agent_pose)
+                        current_agent_pos = current_agent_pose[:3, 3]
                         
-                        slam.resume()
+                        # update occlusion map
+                        self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
 
-                        # visualize map
-                        # self.policy.visualize_map(c2w, goal_pose, map_path)
-                        
-                    action_id = action_queue.get()
-
-                elif self.policy_name == "frontier":
-                    if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0 :
-                        save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
-                        self.policy.save(save_path)
-
-                    # current_agent_pose = slam.get_latest_frame()
-                    # current_agent_pos = current_agent_pose[:3, 3]
-                    current_agent_pose = camera_pose.copy()
-                    current_agent_pos = current_agent_pose[:3, 3]
-                    # print("Current agent pose: ", current_agent_pose)
-
-                    # mapping_start = time.time()
-                    agent_state = self.habitat_ds.sim._sim.get_agent_state()
-                    agent_rotation = agent_state.rotation  # quaternion: x, y, z, w
-                    agent_translation = agent_state.position
-
-                    quat = [agent_rotation.w, agent_rotation.x, agent_rotation.y, agent_rotation.z]  # w, x, y, z
-                    rot_matrix = o3d.geometry.get_rotation_matrix_from_quaternion(quat)
-                    current_agent_pose_new = np.eye(4)
-                    current_agent_pose_new[:3, :3] = rot_matrix
-                    current_agent_pose_new[:3, 3] = agent_translation
-
-                    # print("Current agent pose new: ", current_agent_pose_new)
-                    # update occlusion map
-                    self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
-                    # logger.info(f"Frame: {slam.cur_frame_idx} Mapping time: {time.time() - mapping_start:.5f}")
-                    
-                    # self.policy.visualize_map(c2w)
-                    while action_queue.empty():
-                        # pause backend during evaluation
-                        slam.pause()
-                        
+                        # logger.info(f"frame: {slam.cur_frame_idx} Mapping time: {time.time() - mapping_start:.5f}")
+                        best_goal = None
+                        best_map_path = None
                         best_path = None
-                        while best_path is None:
-                            current_agent_pos = current_agent_pose[:3, 3]
-                            # testing
-                            # gaussian_points = slam.gaussian_points
-                            # global plan -- select global 
-                            # global_points, _, _ = \
-                            #         self.policy.global_planning(None, None, 
-                            #                                     None, expansion, visualize=True, 
-                            #                                     agent_pose=current_agent_pos)
-                            global_points, _, _ = \
-                                self.policy.global_planning_frontier(expansion, visualize=True, 
-                                                            agent_pose=current_agent_pos)
+                        best_global_path = None
+
+                        while action_queue.empty():
+                            # pause backend during evaluation
+                            slam.pause()
+
+                            if expansion > 10:
+                                # replan 10 times, wrong, exit
+                                raise NoFrontierError()
                             
-                            # print("Global points: ", global_points)
-                            if global_points is None:
-                                raise NoFrontierError("No frontier found")
+                            try:
+                                print(">> Planning the best path")
+                                best_path, best_map_path, best_goal, best_world_path, \
+                                    best_global_path, global_points, EIGs = self.plan_best_dynamic_path(slam, current_agent_pose, expansion, t, goal_pose)
 
-                            global_points = global_points.cpu().numpy()
-                            
-                            # plan actions for each global goal
-                            _, path_actions, paths_arr = self.action_planning(global_points, current_agent_pose, None, t)
-                            if len(path_actions) == 0:
-                                raise NoFrontierError("No path actions found")
+                                if best_path is None:
+                                    logger.warn(f"time_step {t}, no valid path found, re-plan")
+                                    continue
+                            except PruneException as e:
+                                logger.info(" Too many invisible points, replan ... ")
+                                continue
 
-                            best_path = path_actions[0]
-                            map_path = paths_arr[0]
-
-                            # print("Best path: ", best_path)
-
-
-                        if best_path is None:
-                            print("No best path! Turning")
-                            expansion += 1
-                            if not action_queue.full():
-                                action_queue.put(2)
-                        else:
-                            expansion = 1
-                            # Fill into action queue
-                            print(best_path)
-                            for action_id in best_path:
+                            if best_path is None:
+                                print("No best path! Turning")
+                                expansion += 1
                                 if not action_queue.full():
-                                    action_queue.put(action_id)
-                                else:
-                                    break
-                    
-                        # resume backend process after planning
-                        slam.resume()
-
-                        # visualize map
-                        # self.policy.visualize_map(c2w, goal_pose, map_path)
+                                    action_queue.put(2)
+                            else:
+                                expansion = 1
+                                # Fill into action queue
+                                print(best_path)
+                                for action_id in best_path:
+                                    if not action_queue.full():
+                                        action_queue.put(action_id)
+                                    else:
+                                        break
                         
-                    action_id = action_queue.get()
+                            slam.resume()
 
+                            # visualize map
+                            # self.policy.visualize_map(c2w, best_goal, best_map_path, best_global_path)
+
+                            goal_pose = best_goal
+                        
+                        action_id = action_queue.get()
+                        # time.sleep(1.)
+
+                    elif self.policy_name == "UPEN":
+                        action_id, finish = self.policy.predict_action(t, self.abs_poses, depth)    
+                        if finish:
+                            t += 1
+                            break
+
+                    elif self.policy_name == "TrajReader":
+                        pos = self.traj_poses[t, :3]
+                        quat = self.traj_poses[t, 3:]
+
+                        set_agent_state(self.habitat_ds.sim.sim, np.concatenate([pos, quat]))
+
+                        observations = None
+                        observations = self.habitat_ds.sim.sim.get_sensor_observations()
+                        observations = {"rgb": torch.from_numpy(observations["rgb"]).cuda(), "depth": torch.from_numpy(observations["depth"]).cuda()}
+
+                        # estimate distance covered by agent
+                        current_pos = self.habitat_ds.sim.sim.get_agent_state().position
+                        agent_episode_distance += utils.euclidean_distance(current_pos, previous_pos)
+                        previous_pos = current_pos
+                        t+=1
+                        continue
+                    
+                    elif self.policy_name == "random_walk":
+                        if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0 :
+                            save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
+                            self.policy.save(save_path)
+
+                        current_agent_pose = slam.get_latest_frame()
+                        current_agent_pos = current_agent_pose[:3, 3]
+                        print("Current agent pose: ", current_agent_pose)
+                        # mapping_start = time.time()
+                        agent_state = self.habitat_ds.sim._sim.get_agent_state()
+                        agent_rotation = agent_state.rotation  # quaternion: x, y, z, w
+                        agent_translation = agent_state.position
+
+                        quat = [agent_rotation.w, agent_rotation.x, agent_rotation.y, agent_rotation.z]  # w, x, y, z
+                        rot_matrix = o3d.geometry.get_rotation_matrix_from_quaternion(quat)
+                        # current_agent_pose = np.eye(4)
+                        # current_agent_pose[:3, :3] = rot_matrix
+                        # current_agent_pose[:3, 3] = agent_translation
+
+                        # current_agent_pose = slam.get_latest_frame()
+                        current_agent_pos = current_agent_pose[:3, 3]
+
+
+                        # update occlusion map
+                        self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
+                        # logger.info(f"Frame: {slam.cur_frame_idx} Mapping time: {time.time() - mapping_start:.5f}")
+                        
+                        # self.policy.visualize_map(c2w)
+                        while action_queue.empty():
+                            # pause backend during evaluation
+                            slam.pause()
+                            # Randomly select an action in [1, 2, 3]
+                            action_id = np.random.choice([1, 2, 3])
+                            action_queue.put(action_id)
+                            
+                            slam.resume()
+
+                            # visualize map
+                            # self.policy.visualize_map(c2w, goal_pose, map_path)
+                            
+                        action_id = action_queue.get()
+
+                    elif self.policy_name == "frontier":
+                        if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0 :
+                            save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
+                            self.policy.save(save_path)
+
+                        current_agent_pose = camera_pose.copy()
+                        
+                        # update occlusion map
+                        self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
+                        
+                        # self.policy.visualize_map(c2w)
+                        while action_queue.empty():
+                            # pause backend during evaluation
+                            slam.pause()
+                            
+                            best_path = None
+                            while best_path is None:
+                                current_agent_pos = current_agent_pose[:3, 3]
+
+                                global_points, _, _ = \
+                                    self.policy.global_planning_frontier(expansion, visualize=True, 
+                                                                agent_pose=current_agent_pos)
+                                
+                                # print("Global points: ", global_points)
+                                if global_points is None:
+                                    raise NoFrontierError("No frontier found")
+
+                                global_points = global_points.cpu().numpy()
+                                
+                                # plan actions for each global goal
+                                _, path_actions, paths_arr = self.action_planning(global_points, current_agent_pose, None, t)
+                                if len(path_actions) == 0:
+                                    raise NoFrontierError("No path actions found")
+
+                                best_path = path_actions[0]
+                                map_path = paths_arr[0]
+
+                                # print("Best path: ", best_path)
+
+
+                            if best_path is None:
+                                print("No best path! Turning")
+                                expansion += 1
+                                if not action_queue.full():
+                                    action_queue.put(2)
+                            else:
+                                expansion = 1
+                                # Fill into action queue
+                                print(best_path)
+                                for action_id in best_path:
+                                    if not action_queue.full():
+                                        action_queue.put(action_id)
+                                    else:
+                                        break
+                        
+                            # resume backend process after planning
+                            slam.resume()
+
+                            # visualize map
+                            # self.policy.visualize_map(c2w, goal_pose, map_path)
+                            
+                        action_id = action_queue.get()
+                
+                # if object tracking is enabled, we use the local policy to track the object
+                else:
+                    pass
+                
                 # explicitly clear observation otherwise they will be kept in memory the whole time
                 observations = None
                 
@@ -1599,6 +1522,149 @@ class NavTester(object):
         #     pickle.dump(paths_arr, stats)
 
         return best_path, best_map_path, best_goal, best_world_path, best_global_path, global_points, EIGs
+
+    def plan_best_dynamic_path(self, slam: GaussianSLAM, 
+                       current_agent_pose: np.array, 
+                       expansion:int,  t: int, last_goal = None):
+        """ Path & Action planning 
+        
+        Args:
+            slam -- Gaussian SLAM system.
+            current_agent_pose (4, 4) 
+            expansion (int) -- expansion factor for sampling pose
+            t (int) --  time step
+            last_goal (np.array) -- last goal point
+
+        Return:
+            best_path, 
+            best_map_path, 
+            best_goal,             (4, 4) selected goal point
+            best_world_path, 
+            best_global_path         
+            global_point:           (N, 4, 4) global points
+            EIGs:                   (N, ) EIG for each goal point
+        """
+        current_agent_pos = current_agent_pose[:3, 3]
+        gaussian_points = slam.gaussian_points
+        
+        # global plan -- select global 
+        pose_proposal_fn = None if not hasattr(slam, "pose_proposal") else getattr(slam, "pose_proposal")
+        print("Pose proposal function: ", pose_proposal_fn)
+        global_points, EIGs, random_gaussian_params = \
+            self.policy.global_planning(slam.pose_eval, gaussian_points, pose_proposal_fn, \
+                                        expansion=expansion, visualize=True, \
+                                        agent_pose=current_agent_pos, last_goal=last_goal, slam=slam)
+
+        # sort global points by EIG 
+        EIGs = EIGs.numpy()
+        global_points = global_points.cpu().numpy()
+        sort_index = np.argsort(EIGs)[::-1]
+        global_points = global_points[sort_index]
+        EIGs = EIGs[sort_index]
+        
+        if self.cfg.num_uniform_H_train > 0:
+            uiform_positions, uiform_quants = self.uniform_rand_poses()
+            H_train = None
+            for cur_uni_pos, cur_uni_quat in tqdm(random.sample(list(zip(uiform_positions, uiform_quants)), \
+                                                                self.cfg.num_uniform_H_train), 
+                                                                desc="Computing uniformH_train"):
+                cur_uni_w2c = pos_quant2w2c(cur_uni_pos, cur_uni_quat, self.habitat_ds.sim.sim.get_agent_state())
+
+                cur_H = slam.compute_Hessian(cur_uni_w2c, random_gaussian_params=random_gaussian_params, return_points=True, return_pose=False)
+                H_train = H_train + cur_H if H_train is not None else cur_H.detach().clone()
+        else:
+            H_train = slam.compute_H_train(random_gaussian_params)
+            # H_train = rearrange(H_train, "np c -> (np c)")
+        
+        gs_pts_cnt = slam.gs_pts_cnt(random_gaussian_params)
+
+        best_global_path = None
+        best_path_EIG = -1.
+        best_path = None
+        best_goal = None
+        best_map_path = None
+        best_world_path = None
+        valid_path = 0
+
+        # plan actions for each global goal
+        valid_global_pose, path_actions, paths_arr = self.action_planning(global_points, current_agent_pose, slam.gaussian_points, t)
+        logger.info(f"Evaluate path actions: {len(path_actions)}")
+        total_path_EIGs = []
+
+        for pose_np, path_action, paths, final_EIG in tqdm(zip(valid_global_pose, path_actions, paths_arr, EIGs), desc="Evaluate Paths"):
+            # check cluster manager  
+            if cm.should_exit():
+                cm.requeue()
+
+            if valid_path > 20:
+                break
+            
+            valid_path += 1
+           
+            # set to cam height
+            future_pose = current_agent_pose.copy()
+            future_pose[1, 3] = self.policy.cam_height
+
+            H_train_path = H_train.clone()
+            total_path_EIG = 0
+            map_path = []
+            world_path = []
+            curr_action = []
+
+            for action in path_action:
+
+                future_pose = compute_next_campos(future_pose, action, self.slam_config["forward_step_size"], self.slam_config["turn_angle"])
+                future_pose_w2c = np.linalg.inv(future_pose)
+                cur_H, pose_H = slam.compute_Hessian(future_pose_w2c, random_gaussian_params=random_gaussian_params, 
+                                                        return_pose=True, return_points=True)
+                H_train_inv_path = torch.reciprocal(H_train_path + self.cfg.H_reg_lambda)
+                
+                if self.cfg.vol_weighted_H:
+                    point_EIG = torch.log(torch.sum(cur_H * H_train_inv_path / gs_pts_cnt))
+                else:
+                    point_EIG = torch.log(torch.sum(cur_H * H_train_inv_path))
+                
+                pose_EIG = torch.log(torch.linalg.det(pose_H))
+
+                curr_action.append(action)
+            
+                total_path_EIG += self.cfg.path_pose_weight * pose_EIG.item()
+                # iterative cumulation
+                if (len(curr_action) + 1) % self.cfg.acc_H_train_every == 0:
+                    total_path_EIG += self.cfg.path_point_weight * point_EIG.item()
+                    H_train_path = H_train_path + cur_H
+
+                if action == 1:
+                    map_coord = future_pose[[0, 2], 3]
+                    world_path.append(map_coord)
+                    map_coord = self.policy.convert_to_map(map_coord)
+                    map_path.append(map_coord)
+
+            if self.cfg.path_end_weight > 0:
+                total_path_EIG = total_path_EIG / len(curr_action) + self.cfg.path_end_weight * final_EIG
+            else:
+                total_path_EIG = (total_path_EIG + final_EIG) / len(curr_action)
+            
+            total_path_EIGs.append(total_path_EIG)
+
+            # select the best one
+            if total_path_EIG > best_path_EIG:
+                best_path_EIG = total_path_EIG
+                best_path = curr_action
+                best_goal = pose_np
+                best_global_path = paths
+                best_map_path = map_path
+                best_world_path = world_path
+
+        # dump paths_arr and total_path_EIGs using pickle
+        # with open(os.path.join(self.policy.eval_dir, f"paths_arr_{t}.pkl"), "wb") as f:
+        #     stats = dict(paths_arr=paths_arr, total_path_EIGs=total_path_EIGs,
+        #                  map_center = self.policy.map_center.cpu().numpy(), cell_size = self.policy.cell_size,
+        #                  grid_dim = self.policy.grid_dim)
+        #     pickle.dump(paths_arr, stats)
+
+        return best_path, best_map_path, best_goal, best_world_path, best_global_path, global_points, EIGs
+    
 
     def action_planning(self, global_points, current_agent_pose, gaussian_points, t):
         """

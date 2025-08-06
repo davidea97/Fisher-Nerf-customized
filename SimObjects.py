@@ -10,7 +10,8 @@ class SimObject:
         self.is_rotating = False
         self.accumulated_rotation = 0.0  
         self.rotation_step = np.pi / 18
-        self.obj_linear_velocity = np.array([0.0, 0.0, 2.0])
+        # self.obj_linear_velocity = np.array([0.0, 0.0, 2.0])
+        self.obj_linear_velocity = np.array([0.0, 0.0, 0.0])
         self.show_object_axes = False
         self.linear_speed = speed
 

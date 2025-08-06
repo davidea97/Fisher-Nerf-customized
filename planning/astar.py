@@ -708,8 +708,7 @@ class AstarPlanner:
         # build frontiers
         print(">> Generate possible candidate pose")
         candidate_pos, free_space = self.build_frontiers(None)
-        print("CANDIDATE POS: ", candidate_pos)
-        print("Type of candidate_pos: ", type(candidate_pos))
+
         # print("FRONTIERS BUILT: ", candidate_pos)
         use_frontier = candidate_pos is not None
         # this is frontier mode, return directly
@@ -766,7 +765,6 @@ class AstarPlanner:
         scores, poses = self.pose_eval(candidate_pose)
         # print("Pose evaluation time: ", time.time() - evaluate_time)
         #visualize
-        visualization_time = time.time()
         if visualize:
             occ_map = self.occ_map.argmax(0) == 1
             binarymap = occ_map.cpu().numpy().astype(np.uint8)
@@ -791,18 +789,24 @@ class AstarPlanner:
 
             # candidate poses
             normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
-            for score, pose in zip(normalized_scores, poses):
-                heatcolor = heatmap(score.item())[:3]
-                pt = self.convert_to_map([pose[0,3],pose[2,3]])
-                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+            for idx, (score, pose) in enumerate(zip(normalized_scores, poses)):
+                pt = self.convert_to_map([pose[0, 3], pose[2, 3]])
+
+                # if len(poses) == 1:
+                    # Colore giallo (BGR): (0, 255, 255)
+                vis_map = cv2.circle(vis_map, (pt[0], pt[1]), 2, (0, 255, 255), -1)
+                # else:
+                #     heatcolor = heatmap(score.item())[:3]
+                #     color = (int(heatcolor[0] * 255), int(heatcolor[1] * 255), int(heatcolor[2] * 255))
+                #     vis_map = cv2.circle(vis_map, (pt[0], pt[1]), 1, color, -1)
                 # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
 
             # agent position
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
-
-            # plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
-            # plt.close()
+            os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
+            plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+            plt.close()
 
         # print("Visualization time: ", time.time() - visualization_time)
         # and we only select the TOP 50 points

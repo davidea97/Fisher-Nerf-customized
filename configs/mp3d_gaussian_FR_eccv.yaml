@@ -1,16 +1,16 @@
 
 workdir: experiments/GaussianSLAM
-run_name: eccv_reproduce
+run_name: obj_act_map
 
 # planning parameters
 policy: 
-  name: frontier
+  name: frontier # gaussians_based # frontier
   planning_queue_size: 30
 
 use_wandb: True
 
 H_reg_lambda: 0.000001
-num_frames: &total_frames 2000
+num_frames: &total_frames 1000
 checkpoint_interval: 1000
 # number of keyframes for local mapping
 forward_step_size: 0.065
