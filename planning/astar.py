@@ -695,6 +695,8 @@ class AstarPlanner:
         self.previous_candidates = poses
         print("Poses: ", poses.shape, "Scores: ", scores.shape)
         return poses, scores, random_gaussian_params
+    
+
 
     def global_planning_frontier(self, expansion=1, visualize=True, 
                         agent_pose=None, last_goal = None, slam=None):
@@ -818,6 +820,140 @@ class AstarPlanner:
         # log the topk candidates
         self.previous_candidates = poses
 
+        return poses, scores, random_gaussian_params
+    
+    def global_object_planning(self, pose_evaluation_fn:Callable = None, gaussian_points = None, 
+                        goal_proposal_fn:Callable = None, expansion=1, visualize=True, 
+                        agent_pose=None):
+        """ 
+        Global Planning for next target goal 
+        
+        Args:
+            pose_evaluation_fn: (Callable), calculate
+            gaussian_points: 3D Gaussian means for navigation
+            goal_proposal_fn: propose candidate pose when no frontiers
+            expansion (int): expansion factor (increase when no best path is found)
+            visualize:  
+        """
+        # build frontiers
+        print(">> Global Object Planning")
+        
+        candidate_pos, free_space = self.build_frontiers(gaussian_points)
+        use_frontier = candidate_pos is not None
+
+        # this is frontier mode, return directly
+        if pose_evaluation_fn is None and not use_frontier:
+            return None, None, None
+    
+        # generate random gaussians
+        if self.add_random_gaussians:
+            random_gaussian_params = self.generate_random_gaussians(candidate_pos)
+        else:
+            random_gaussian_params = None
+
+        # propose goals when no frontiers exist
+        if candidate_pos is None and goal_proposal_fn is not None:
+            # propose goals
+            candidate_pos = goal_proposal_fn(self.K, self.cam_height)
+
+        # extract goals
+        candidate_pose = []
+        if candidate_pos is not None:
+            # centering
+            if isinstance(candidate_pos, np.ndarray):
+                candidate_pos = torch.from_numpy(candidate_pos).cuda()
+            if self.centering:
+                candidate_pos = torch.mean(candidate_pos, dim=0, keepdim=True)
+
+            # sample poses
+            while len(candidate_pose) == 0:
+                candidate_pose = self.generate_candidate(candidate_pos, expansion)
+                # expand the radius
+                expansion *= 1.5
+            
+                # select goals in freespace
+                eroded_free_space = cv2.erode(free_space.astype(np.uint8), np.ones((10, 10), np.uint8))
+                if eroded_free_space.sum() > 40 :
+                    # when no frontiers 
+                    candidate_xy = candidate_pose[:, [0, 2], 3]
+                    candidate_xy[:, 0] = (candidate_xy[:, 0] - self.map_center[0]) / self.cell_size + self.grid_dim[0] // 2
+                    candidate_xy[:, 1] = (candidate_xy[:, 1] - self.map_center[1]) / self.cell_size + self.grid_dim[1] // 2
+                    candidate_xy = candidate_xy.long()
+
+                    eroded_free_space = torch.from_numpy(eroded_free_space).cuda()
+                    free_pose = eroded_free_space[candidate_xy[:, 1], candidate_xy[:, 0]]
+                    candidate_pose = candidate_pose[free_pose]
+
+        # add uniformly sampled poses
+        if not use_frontier:
+            # random sampling     
+            random_pose = self.sample_random_candidate(agent_pose, free_space, sample_range=2 * expansion, sample_size=int(400*expansion))
+            if len(candidate_pose) == 0:
+                candidate_pose = random_pose
+            else:
+                candidate_pose = torch.cat([candidate_pose, random_pose], dim=0)
+
+        # add last goal
+        # if last_goal is not None:
+        #     if isinstance(last_goal, np.ndarray):
+        #         last_goal = torch.from_numpy(last_goal).float().cuda().unsqueeze(0)
+        #     candidate_pose = torch.cat([candidate_pose, last_goal], dim=0)
+
+        # append previous top candidates
+        # if self.previous_candidates is not None:
+        #     candidate_pose = torch.cat([candidate_pose, self.previous_candidates], dim=0)
+
+        if pose_evaluation_fn is None:
+            scores, poses = self.pose_eval(candidate_pose)
+        else:
+            scores, poses = pose_evaluation_fn(candidate_pose, random_gaussian_params)
+        #visualize
+        if visualize:
+            occ_map = self.occ_map.argmax(0) == 1
+            binarymap = occ_map.cpu().numpy().astype(np.uint8)
+            
+            # dilate binary map
+            kernel = np.ones((3, 3), np.uint8)  
+            binarymap = cv2.dilate(binarymap, kernel)
+
+            #to RGB
+            vis_map = np.zeros((binarymap.shape[0],binarymap.shape[1],3), np.uint8)
+            vis_map[:,:,0][binarymap!=0] = 255
+            vis_map[:,:,1][binarymap!=0] = 255
+            vis_map[:,:,2][binarymap!=0] = 255
+
+            #frontiers
+            if self.frontier.sum() != 0:
+                frontier = self.frontier.copy()
+                frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
+                vis_map[:,:,0][frontier!=0] = 0
+                vis_map[:,:,1][frontier!=0] = 255
+                vis_map[:,:,2][frontier!=0] = 0
+
+            # candidate poses
+            normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
+            for score, pose in zip(normalized_scores, poses):
+                heatcolor = heatmap(score.item())[:3]
+                pt = self.convert_to_map([pose[0,3],pose[2,3]])
+                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+                # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
+
+            # agent position
+            pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
+            vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+
+            # plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+            # plt.close()
+
+        # and we only select the TOP 50 points
+        topk = 20
+        sort_index = torch.argsort(scores, descending=True)
+        poses = poses[sort_index[:topk]]
+        scores = scores[sort_index[:topk]]
+
+        # log the topk candidates
+        self.previous_candidates = poses
+        print("Poses: ", poses.shape, "Scores: ", scores.shape)
         return poses, scores, random_gaussian_params
     
     def generate_random_gaussians(self, candidate_pos):

@@ -390,13 +390,9 @@ class GaussianSLAM:
         # Camera intrinsics
         # print("Config: ", config)
         calibration = config["SLAM"]["Dataset"]["Calibration"]
-        print("Calibration: ", calibration)
+        print("Calibration parameters: ", calibration)
         # Camera prameters
-        width = calibration["width"]
-        height = calibration["height"]
-        K = np.array(
-            [[calibration["fx"], 0.0, calibration["cx"]], [0.0, calibration["fy"], calibration["cy"]], [0.0, 0.0, 1.0]]
-        )
+        K = np.array([[calibration["fx"], 0.0, calibration["cx"]], [0.0, calibration["fy"], calibration["cy"]], [0.0, 0.0, 1.0]])
 
         self.intrinsics = torch.from_numpy(K).float().cuda()
 
