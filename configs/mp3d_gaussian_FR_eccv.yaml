@@ -4,7 +4,7 @@ run_name: obj_act_map
 
 # planning parameters
 policy: 
-  name: frontier # gaussians_based # frontier
+  name: gaussians_based # gaussians_based # frontier
   planning_queue_size: 30
 
 use_wandb: True

@@ -379,7 +379,7 @@ def add_new_gaussians(config, params, variables, curr_data, sil_thres,
 
     return params, variables
 
-class GaussianSLAM:
+class GaussianObjectSLAM:
     # config = dict()
 
     def __init__(self, config: CfgNode):
@@ -390,7 +390,7 @@ class GaussianSLAM:
         # Camera intrinsics
         # print("Config: ", config)
         calibration = config["SLAM"]["Dataset"]["Calibration"]
-        print("Calibration parameters: ", calibration)
+        # print("Calibration parameters: ", calibration)
         # Camera prameters
         K = np.array([[calibration["fx"], 0.0, calibration["cx"]], [0.0, calibration["fy"], calibration["cy"]], [0.0, 0.0, 1.0]])
 
@@ -436,7 +436,7 @@ class GaussianSLAM:
         self.sm = ClusterStateManager()
         self.cell_size = self.config["explore"]["cell_size"]
 
-    def init(self, color: torch.Tensor, depth: torch.Tensor, pose: torch.Tensor,
+    def init(self, color: torch.Tensor, depth: torch.Tensor, pose: torch.Tensor, mask: torch.Tensor = None,
              scene_bounds: Optional[List[np.ndarray]] = None):
         """
         Initialize the SLAM system
@@ -460,25 +460,35 @@ class GaussianSLAM:
         # Setup Camera
         self.cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), np.eye(4))
 
-        # [fx, fy, cx, cy]
-        _, h0, w0 = color.shape
-        h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
-        w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
-
         densify_intrinsics = intrinsics
 
         # Get Initial Point Cloud (PyTorch CUDA Tensor)
-        mask = (depth > 10 * self.cell_size) # Mask out invalid depth values
-        mask = mask.reshape(-1)
+        depth_mask = (depth > 10 * self.cell_size) # Mask out invalid depth values
+        depth_mask = depth_mask.reshape(-1)
+
+        # Merge depth mask and object mask
+        if mask is not None:
+            if mask.dim() == 3 and mask.shape[-1] == 1:     # (H,W,1)
+                obj_mask_2d = mask[..., 0]
+            elif mask.dim() == 3 and mask.shape[0] == 1:    # (1,H,W)
+                obj_mask_2d = mask[0]
+            else:                                           # (H,W)
+                obj_mask_2d = mask
+            obj_mask_2d = obj_mask_2d.bool()
+            obj_mask_flat = obj_mask_2d.reshape(-1)
+            merged_mask_2d = depth_mask & obj_mask_flat
+        else:
+            merged_mask_2d = depth_mask
+
         init_pt_cld, mean3_sq_dist = get_pointcloud(color, depth, densify_intrinsics, w2c, 
-                                                    mask=mask, compute_mean_sq_dist=True, downsample = self.config["downsample_pcd"],
+                                                    mask=merged_mask_2d, compute_mean_sq_dist=True, downsample = self.config["downsample_pcd"],
                                                     mean_sq_dist_method="projective")
 
         # Initialize Parameters
         self.params, self.variables = initialize_params(init_pt_cld, self.config["num_frames"], 
                                                             mean3_sq_dist, isotropic=self.config["isotropic"])
 
-        # Initialize an estimate of scene radius for Gaussian-Splatting Densification
+        # Initialize an estimate of object radius for Gaussian-Splatting Densification
         self.variables['scene_radius'] = torch.max(depth) / self.config["scene_radius_depth_ratio"]
 
         # Set the first frame to w2c
@@ -545,7 +555,7 @@ class GaussianSLAM:
         return {"render": im, "depth": depth}
 
 
-    def track_rgbd(self, color, depth, gt_w2c = None, action = None):
+    def track_rgbd(self, color, depth, gt_w2c = None, action = None, obj_mask_2d=None):
         if not self.initialize:
             pose = torch.eye(4) if gt_w2c is None else gt_w2c
             self.init(color, depth, pose)
@@ -566,8 +576,13 @@ class GaussianSLAM:
         curr_gt_w2c = gt_w2c if gt_w2c is not None else None # Place Holder here
         self.gt_w2c_all_frames.append(curr_gt_w2c)
         iter_time_idx = time_idx
-        curr_data = {'cam': self.cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': self.intrinsics, 
-                'w2c': self.first_frame_w2c, 'iter_gt_w2c_list': self.gt_w2c_all_frames}
+        curr_data = {'cam': self.cam, 
+                     'im': color, 
+                     'depth': depth, 
+                     'id': iter_time_idx, 
+                     'intrinsics': self.intrinsics, 
+                     'w2c': self.first_frame_w2c, 
+                     'iter_gt_w2c_list': self.gt_w2c_all_frames}
 
         # import pdb; pdb.set_trace()
         if time_idx > 0 and not self.config['tracking']['use_gt_poses']:
@@ -656,6 +671,7 @@ class GaussianSLAM:
                 self.params, self.variables = add_new_gaussians(self.config, self.params, self.variables, densify_curr_data, 
                                                       self.config['mapping']['sil_thres'], time_idx,
                                                       self.config['mean_sq_dist_method'], self.config['mapping']['densify_dict'],
+                                                      obj_mask_2d=obj_mask_2d,
                                                       add_rand_gaussians=self.config.mapping.add_rand_gaussians, downsample_pcd=self.config["downsample_pcd"])
                                                       
                 post_num_pts = self.params['means3D'].shape[0]

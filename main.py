@@ -18,7 +18,7 @@ habitat_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(habitat_root)
 
 from train_options import TrainOptions
-from tester_gaussians_navigation import NavTester
+from tester_gaussians_navigation_old import NavTester
 
 def nav_testing(options, scene_id, dynamic_scene=False, dynamic_scene_rec=False, dino_extraction=False, save_data=False, save_map=False, gaussian_optimization=False):
     tester = NavTester(options, scene_id, dynamic_scene, dynamic_scene_rec, dino_extraction, save_data, save_map, gaussian_optimization)
@@ -35,7 +35,7 @@ if __name__ == '__main__':
     dino_extraction = False
     save_data = True
     save_map = True
-    gaussian_optimization = False
+    gaussian_optimization = True
 
     # Create iterables for map function
     n = len(scene_ids)
