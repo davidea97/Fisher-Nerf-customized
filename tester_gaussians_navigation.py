@@ -67,7 +67,7 @@ import pyrender
 from scripts.evaluation import load_glb_pointcloud, load_ply_pointcloud, apply_transform_to_pointcloud, get_latest_pcl_file, save_pointcloud_as_ply
 from scripts.eval_3d_reconstruction import accuracy_comp_ratio_from_pcl
 
-from utils.object_reconstruction_utils import mask_border_contact, estimate_object_center
+from utils.object_reconstruction_utils import mask_border_contact, estimate_object_center, object_center_error, object_size_ratio
 
 # FORMAT = "%(pathname)s:%(lineno)d %(message)s"
 OBJ_SCALE_FACTOR = 0.7
@@ -198,6 +198,8 @@ class NavTester(object):
         self.save_map = save_map
         self.object_tracking = False
         self.init_object_slam = False
+        self.init_object_slam_done = False
+        self.action_queue = None  # Queue for actions to be executed by the policy
 
         self.gaussian_optimization = gaussian_optimization
 
@@ -297,7 +299,8 @@ class NavTester(object):
         # Dynamic Object initialization
         if self.dynamic_scene:
             # self.camera_forward_offset = [-2.0, 0.0, -1.0]
-            self.camera_forward_offset = [0.0, 1.5, -1.0]
+            # self.camera_forward_offset = [0.0, 1.5, -1.0]
+            self.camera_forward_offset = [1.5, 1.5, 1.0]
             self.dynamic_object_path = "habitat_example_objects_0.2/wheeled_robot"
             # find the glb file within the dynamic_object_path
             obj_glb_files = glob.glob(os.path.join(self.options.root_path, self.dynamic_object_path, "*.glb"))
@@ -525,47 +528,38 @@ class NavTester(object):
             object_position = None
 
             # Check if the initial position is navigable
-            if pathfinder.is_navigable(initial_obj_pos):
-                object_position = initial_obj_pos
-                print("Using initial camera-forward position for the dynamic object.")
-            else:
-                # Otherwise, sample a random navigable position
-                print("Initial position not navigable. Sampling random position.")
-                found = False
-                max_tries = 100
-                for _ in range(max_tries):
-                    sample_pos = pathfinder.get_random_navigable_point()
-                    if sample_pos is not None:
-                        object_position = sample_pos
-                        # Increase y coordinate to place the object above the ground
-                        # object_position[1] += 0.5  # Adjust height as needed
-                        print("Object position sampled:", object_position)
-                        found = True
-                        break
+            # if pathfinder.is_navigable(initial_obj_pos):
+            #     object_position = initial_obj_pos
+            #     print("Using initial camera-forward position for the dynamic object.")
+            # else:
+            #     # Otherwise, sample a random navigable position
+            #     print("Initial position not navigable. Sampling random position.")
+            #     found = False
+            #     max_tries = 100
+            #     for _ in range(max_tries):
+            #         sample_pos = pathfinder.get_random_navigable_point()
+            #         if sample_pos is not None:
+            #             object_position = sample_pos
+            #             # Increase y coordinate to place the object above the ground
+            #             # object_position[1] += 0.5  # Adjust height as needed
+            #             print("Object position sampled:", object_position)
+            #             found = True
+            #             break
 
-                if not found:
-                    raise RuntimeError("Couldn't find a random navigable point for the object.")
-
+            #     if not found:
+            #         raise RuntimeError("Couldn't find a random navigable point for the object.")
+            object_position = initial_obj_pos
             # Snap the object position to the nearest navigable point
             ground_pos = mn.Vector3(*pathfinder.snap_point(object_position))
 
             # Get bounding box height
 
-            object_height = 0.6
+            object_height = 0.5
             # Offset to place base of object just above ground
             offset_y = object_height / 2.0 + 0.01  # + small epsilon to avoid z-fighting
             ground_pos.y += offset_y
 
             self.sim_obj.set_translation(ground_pos)
-            # self.sim_obj.set_translation(ground_pos)
-            # angle_degrees = 90
-            # angle_radians = math.radians(angle_degrees)
-
-            # # Create rotation quaternion
-            # rotation = mn.Quaternion.rotation(mn.Rad(angle_radians), mn.Vector3(0, 1.0, 0))
-
-            # # Set rotation
-            # self.sim_obj.set_rotation(rotation)
 
         episode = None
         observations_cpu = self.habitat_ds.sim.sim.get_sensor_observations()
@@ -600,7 +594,7 @@ class NavTester(object):
         self.abs_agent_poses = []
 
         # init local policy
-        action_queue = self.init_local_policy(slam, init_c2w, intrinsics, episode)
+        self.init_local_policy(slam, init_c2w, intrinsics, episode)
 
         agent_episode_distance = 0.0 # distance covered by agent at any given time in the episode
         previous_pos = self.habitat_ds.sim.sim.get_agent_state().position
@@ -772,9 +766,14 @@ class NavTester(object):
                 object_detected = np.sum(object_mask_bw)
                 if object_detected > threshold:
                     print(">> Start object tracking and reconstruction")
-                    self.object_tracking = False # True
-                    self.init_object_slam = True
-                    action_queue = queue.Queue(maxsize=100)
+                    self.object_tracking = True # True
+                    if not self.init_object_slam_done:   
+                        self.init_object_slam = True
+                        self.init_object_slam_done = True
+                        # self.action_queue = queue.Queue(maxsize=100)   # TODO: initialize action queue and put the object in the center of the image
+                    else:
+                        self.init_object_slam = False
+                    
                 else:
                     self.object_tracking = False
 
@@ -804,7 +803,7 @@ class NavTester(object):
                         best_path = None
                         best_global_path = None
 
-                        while action_queue.empty():
+                        while self.action_queue.empty():
                             # pause backend during evaluation
                             slam.pause()
 
@@ -827,15 +826,15 @@ class NavTester(object):
                             if best_path is None:
                                 print("No best path! Turning")
                                 expansion += 1
-                                if not action_queue.full():
-                                    action_queue.put(2)
+                                if not self.action_queue.full():
+                                    self.action_queue.put(2)
                             else:
                                 expansion = 1
                                 # Fill into action queue
                                 print(best_path)
                                 for action_id in best_path:
-                                    if not action_queue.full():
-                                        action_queue.put(action_id)
+                                    if not self.action_queue.full():
+                                        self.action_queue.put(action_id)
                                     else:
                                         break
                         
@@ -846,7 +845,7 @@ class NavTester(object):
 
                             goal_pose = best_goal
                         
-                        action_id = action_queue.get()
+                        action_id = self.action_queue.get()
                         # time.sleep(1.)
 
                     elif self.policy_name == "UPEN":
@@ -900,19 +899,19 @@ class NavTester(object):
                         # logger.info(f"Frame: {slam.cur_frame_idx} Mapping time: {time.time() - mapping_start:.5f}")
                         
                         # self.policy.visualize_map(c2w)
-                        while action_queue.empty():
+                        while self.action_queue.empty():
                             # pause backend during evaluation
                             slam.pause()
                             # Randomly select an action in [1, 2, 3]
                             action_id = np.random.choice([1, 2, 3])
-                            action_queue.put(action_id)
+                            self.action_queue.put(action_id)
                             
                             slam.resume()
 
                             # visualize map
                             # self.policy.visualize_map(c2w, goal_pose, map_path)
                             
-                        action_id = action_queue.get()
+                        action_id = self.action_queue.get()
 
                     elif self.policy_name == "frontier":
                         if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0 :
@@ -925,7 +924,7 @@ class NavTester(object):
                         self.policy.update_occ_map(depth, c2w_t, t, self.slam_config["downsample_pcd"])
                         
                         # self.policy.visualize_map(c2w)
-                        while action_queue.empty():
+                        while self.action_queue.empty():
                             # pause backend during evaluation
                             slam.pause()
                             
@@ -957,15 +956,15 @@ class NavTester(object):
                             if best_path is None:
                                 print("No best path! Turning")
                                 expansion += 1
-                                if not action_queue.full():
-                                    action_queue.put(2)
+                                if not self.action_queue.full():
+                                    self.action_queue.put(2)
                             else:
                                 expansion = 1
                                 # Fill into action queue
                                 print(best_path)
                                 for action_id in best_path:
-                                    if not action_queue.full():
-                                        action_queue.put(action_id)
+                                    if not self.action_queue.full():
+                                        self.action_queue.put(action_id)
                                     else:
                                         break
                         
@@ -975,7 +974,7 @@ class NavTester(object):
                             # visualize map
                             # self.policy.visualize_map(c2w, goal_pose, map_path)
                             
-                        action_id = action_queue.get()
+                        action_id = self.action_queue.get()
                 
                 # if object tracking is enabled, we use the local policy to track the object
                 else:
@@ -983,11 +982,15 @@ class NavTester(object):
                         save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
                         self.policy.save(save_path)
                     
+                    obj_mask_t = torch.from_numpy(object_mask_bw).bool().cuda()
+                    # obj_mask_t = torch.from_numpy(object_mask_bw).unsqueeze(-1).bool().cuda()
                     if self.init_object_slam:
                         # Initialize object SLAM 
                         obj_slam = GaussianObjectSLAM(self.slam_config)   # TODO: create a new config for object SLAM
-                        obj_slam.init(img, depth, w2c_t, torch.from_numpy(object_mask_bw).unsqueeze(-1).bool().cuda())
-                        self.init_object_slam = False
+                        obj_slam.init(img, depth, w2c_t, obj_mask_t)
+                        self.init_object_policy(obj_slam, c2w, intrinsics, object_mask_bw)
+
+                        # self.init_object_slam_done = True
 
                     # obj_2d_img = mask_border_contact(object_mask_bw)
                     # print("Border contact:", obj_2d_img) 
@@ -995,11 +998,10 @@ class NavTester(object):
                     # temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
                     # temp_obj_center = estimate_object_center(temp_obj_W_pts)
                     # print("Estimated object center: ", temp_obj_center)
-                    if self.gaussian_optimization:
-                        ate_obj = obj_slam.track_rgbd(img, depth, w2c_t, action_id)
+                    ate_obj = obj_slam.track_rgbd(img, depth, w2c_t, action_id, obj_mask_t)
 
-                        if ate_obj is not None:
-                            self.log({"ate_obj": ate_obj}, t)
+                    if ate_obj is not None:
+                        self.log({"ate_obj": ate_obj}, t)
                             
                     # current_agent_pose = slam.get_latest_frame()
                     current_agent_pose = c2w.copy()
@@ -1014,7 +1016,7 @@ class NavTester(object):
                     best_path = None
                     best_global_path = None
 
-                    while action_queue.empty():
+                    while self.action_queue.empty():
                         # pause backend during evaluation
                         slam.pause()
                         # pause object backend during evaluation
@@ -1039,15 +1041,15 @@ class NavTester(object):
                         if best_path is None:
                             print("No best path! Turning")
                             expansion += 1
-                            if not action_queue.full():
-                                action_queue.put(2)
+                            if not self.action_queue.full():
+                                self.action_queue.put(2)
                         else:
                             expansion = 1
                             # Fill into action queue
                             print(best_path)
                             for action_id in best_path:
-                                if not action_queue.full():
-                                    action_queue.put(action_id)
+                                if not self.action_queue.full():
+                                    self.action_queue.put(action_id)
                                 else:
                                     break
                     
@@ -1058,7 +1060,7 @@ class NavTester(object):
 
                         goal_pose = best_goal
                     
-                    action_id = action_queue.get()
+                    action_id = self.action_queue.get()
 
 
                 # explicitly clear observation otherwise they will be kept in memory the whole time
@@ -1092,8 +1094,8 @@ class NavTester(object):
                         self.policy.occ_map[1, start[0] - 3, start[1]] = 1000
 
                     logger.warn(" cannot move, clear action queue, replan! ")
-                    while not action_queue.empty():
-                        action_id = action_queue.get()
+                    while not self.action_queue.empty():
+                        action_id = self.action_queue.get()
                     
                     robot_stuck_count += 1
                     if robot_stuck_count > 10:
@@ -1487,7 +1489,7 @@ class NavTester(object):
         
         # global plan -- select global 
         pose_proposal_fn = None if not hasattr(slam, "pose_proposal") else getattr(slam, "pose_proposal")
-        print("Pose proposal function: ", pose_proposal_fn)
+        # print("Pose proposal function: ", pose_proposal_fn)
         global_points, EIGs, random_gaussian_params = \
             self.policy.global_planning(slam.pose_eval, gaussian_points, pose_proposal_fn, \
                                         expansion=expansion, visualize=True, \
@@ -1603,7 +1605,7 @@ class NavTester(object):
 
         return best_path, best_map_path, best_goal, best_world_path, best_global_path, global_points, EIGs
 
-    def plan_best_object_path(self, slam: GaussianObjectSLAM, 
+    def plan_best_object_path(self, obj_slam: GaussianObjectSLAM, 
                        current_agent_pose: np.array, 
                        expansion:int,  t: int, last_goal = None):
         """ Path & Action planning 
@@ -1625,16 +1627,16 @@ class NavTester(object):
             EIGs:                   (N, ) EIG for each goal point
         """
         current_agent_pos = current_agent_pose[:3, 3]
-        gaussian_points = slam.gaussian_points
+        gaussian_points = obj_slam.gaussian_points
         
         # global plan -- select global 
-        pose_proposal_fn = None if not hasattr(slam, "pose_proposal") else getattr(slam, "pose_proposal")
-        print("Pose proposal function: ", pose_proposal_fn)
+        pose_proposal_fn = None if not hasattr(obj_slam, "pose_proposal") else getattr(obj_slam, "pose_proposal")
+        print("Start global planning for object")
         global_points, EIGs, random_gaussian_params = \
-            self.policy.global_planning(slam.pose_eval, gaussian_points, pose_proposal_fn, \
+            self.policy.global_object_planning(obj_slam.pose_eval, gaussian_points, pose_proposal_fn, \
                                         expansion=expansion, visualize=True, \
-                                        agent_pose=current_agent_pos, last_goal=last_goal, slam=slam)
-
+                                        agent_pose=current_agent_pos)#, last_goal=last_goal, slam=obj_slam)
+        print(f"Found {len(global_points)} global points: ")
         # sort global points by EIG 
         EIGs = EIGs.numpy()
         global_points = global_points.cpu().numpy()
@@ -1650,13 +1652,13 @@ class NavTester(object):
                                                                 desc="Computing uniformH_train"):
                 cur_uni_w2c = pos_quant2w2c(cur_uni_pos, cur_uni_quat, self.habitat_ds.sim.sim.get_agent_state())
 
-                cur_H = slam.compute_Hessian(cur_uni_w2c, random_gaussian_params=random_gaussian_params, return_points=True, return_pose=False)
+                cur_H = obj_slam.compute_Hessian(cur_uni_w2c, random_gaussian_params=random_gaussian_params, return_points=True, return_pose=False)
                 H_train = H_train + cur_H if H_train is not None else cur_H.detach().clone()
         else:
-            H_train = slam.compute_H_train(random_gaussian_params)
+            H_train = obj_slam.compute_H_train(random_gaussian_params)
             # H_train = rearrange(H_train, "np c -> (np c)")
         
-        gs_pts_cnt = slam.gs_pts_cnt(random_gaussian_params)
+        gs_pts_cnt = obj_slam.gs_pts_cnt(random_gaussian_params)
 
         best_global_path = None
         best_path_EIG = -1.
@@ -1667,7 +1669,7 @@ class NavTester(object):
         valid_path = 0
 
         # plan actions for each global goal
-        valid_global_pose, path_actions, paths_arr = self.action_planning(global_points, current_agent_pose, slam.gaussian_points, t)
+        valid_global_pose, path_actions, paths_arr = self.action_planning(global_points, current_agent_pose, obj_slam.gaussian_points, t)
         logger.info(f"Evaluate path actions: {len(path_actions)}")
         total_path_EIGs = []
 
@@ -1695,14 +1697,21 @@ class NavTester(object):
 
                 future_pose = compute_next_campos(future_pose, action, self.slam_config["forward_step_size"], self.slam_config["turn_angle"])
                 future_pose_w2c = np.linalg.inv(future_pose)
-                cur_H, pose_H = slam.compute_Hessian(future_pose_w2c, random_gaussian_params=random_gaussian_params, 
+                cur_H, pose_H, vis_count = obj_slam.compute_Hessian(future_pose_w2c, random_gaussian_params=random_gaussian_params, 
                                                         return_pose=True, return_points=True)
                 H_train_inv_path = torch.reciprocal(H_train_path + self.cfg.H_reg_lambda)
                 
                 if self.cfg.vol_weighted_H:
-                    point_EIG = torch.log(torch.sum(cur_H * H_train_inv_path / gs_pts_cnt))
+                    if vis_count==0:
+                        point_EIG = torch.tensor(0.)
+                    else:
+                        point_EIG = torch.log(torch.sum(cur_H * H_train_inv_path / gs_pts_cnt))
                 else:
-                    point_EIG = torch.log(torch.sum(cur_H * H_train_inv_path))
+                    # If no visible points, set point_EIG to 0 or set a penalty
+                    if vis_count==0:
+                        point_EIG = torch.tensor(0.) 
+                    else:
+                        point_EIG = torch.log(torch.sum(cur_H * H_train_inv_path))
                 
                 pose_EIG = torch.log(torch.linalg.det(pose_H))
 
@@ -1945,7 +1954,7 @@ class NavTester(object):
         intrinsics: the camera intrinsics
         episode: episode information, set to None
         """
-        action_queue = queue.Queue(maxsize=100)
+        self.action_queue = queue.Queue(maxsize=100)
         
         if self.policy_name in ["gaussians_based", "frontier", "random_walk"]:
             self.policy.init(init_c2w, intrinsics)
@@ -1958,11 +1967,11 @@ class NavTester(object):
                 t = slam.cur_frame_idx
             else:
                 # turn around for initialization # Usually 72 steps
-                init_scan_steps = 8 if not self.options.debug else 2
+                init_scan_steps = 9 if not self.options.debug else 2
                 # for k in range(2):
                 for k in range(init_scan_steps):
-                    action_queue.put(2)
-            # action_queue = queue.Queue(maxsize=self.slam_config["policy"]["planning_queue_size"])
+                    self.action_queue.put(2)
+            # self.action_queue = queue.Queue(maxsize=self.slam_config["policy"]["planning_queue_size"])
         
         elif self.policy_name == "UPEN":
             self.policy.init(self.habitat_ds, episode)
@@ -2002,4 +2011,78 @@ class NavTester(object):
             folder = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
             self.habvis.load(folder)
         
-        return action_queue
+        return self.action_queue
+    
+    def init_object_policy(self,
+                       obj_slam,           # GaussianObjectSLAM
+                       init_c2w,           # camera pose attuale (c2w)
+                       intrinsics,         # torch 3x3
+                       object_mask_bw=None,# numpy HxW (opzionale per centratura)
+                       episode=None) -> queue.Queue:
+        """
+        Init della local policy per la ricostruzione dell'oggetto.
+        Ritorna una nuova self.action_queue dedicata all'oggetto.
+        """
+        
+        # self.action_queue = queue.Queue(maxsize=100)
+        if self.action_queue is None:
+            self.action_queue = queue.Queue(maxsize=100)
+            self.policy.init(init_c2w, intrinsics)
+
+        while not self.action_queue.empty():
+            try:
+                self.action_queue.get_nowait()
+            except queue.Empty:
+                break
+        # Initialize the object SLAM
+        # 
+        print("Init Object Policy")
+
+        if obj_slam.cur_frame_idx > 0:
+            folder = os.path.join(obj_slam.save_dir, "object_point_cloud/iteration_step_{}".format(obj_slam.cur_frame_idx))
+            ckpt_path = os.path.join(folder, "astar_obj.pth")
+            if os.path.exists(ckpt_path):
+                print("Loading Object Astar Policy from:", ckpt_path)
+                self.policy.load(ckpt_path)
+        else:
+            # Check mask
+            if object_mask_bw is not None:
+                err = object_center_error(object_mask_bw)   # [-1,1]
+                actions = []
+
+                if err is not None:
+                    if err > 0.30:
+                        actions.extend([3, 3])
+                    elif err > 0.15:
+                        actions.append(3)
+                    elif err > 0.5:
+                        actions.extend([3, 3, 3])
+                    elif err < -0.30:
+                        actions.extend([2, 2])
+                    elif err < -0.15:
+                        actions.append(2)
+                    elif err < -0.5:
+                        actions.extend([2, 2, 2])
+
+                # Fill the action queue: first centering actions, then orbit
+                for a in actions:
+                    if not self.action_queue.full():
+                        self.action_queue.put(a)
+        
+        if self.action_queue is None:
+            self.habvis.reset()
+            habvis_size = 512 if not hasattr(self, "policy") else self.policy.grid_dim[0]
+            if self.dynamic_scene:
+                self.habvis.set_map(self.habitat_ds.sim.sim, habvis_size, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
+            else:
+                self.habvis.set_map(self.habitat_ds.sim.sim, habvis_size)
+
+        # 6) Parametri SLAM più aggressivi per l’oggetto (se non già impostati)
+        # if hasattr(obj_slam, "config"):
+        #     obj_slam.config['keyframe_every'] = 1
+        #     obj_slam.config['map_every'] = 1
+        #     obj_slam.config['mapping_window_size'] = max(3, obj_slam.config.get('mapping_window_size', 5))
+
+        return self.action_queue
+
+

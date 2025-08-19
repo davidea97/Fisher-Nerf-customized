@@ -681,6 +681,9 @@ class AstarPlanner:
             # agent position
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+            os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
+            plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+            plt.close()
 
             # plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
             # plt.close()
@@ -693,10 +696,9 @@ class AstarPlanner:
 
         # log the topk candidates
         self.previous_candidates = poses
-        print("Poses: ", poses.shape, "Scores: ", scores.shape)
+        # print("Poses: ", poses.shape, "Scores: ", scores.shape)
         return poses, scores, random_gaussian_params
     
-
 
     def global_planning_frontier(self, expansion=1, visualize=True, 
                         agent_pose=None, last_goal = None, slam=None):
@@ -941,7 +943,9 @@ class AstarPlanner:
             # agent position
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
-
+            os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
+            plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+            plt.close()
             # plt.imsave(os.path.join(self.eval_dir, "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
             # plt.close()
 

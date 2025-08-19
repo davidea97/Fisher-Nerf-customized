@@ -1511,7 +1511,10 @@ class GaussianSLAM:
         rendervar['means2D'].retain_grad()
         im, radius, _, = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
         im.backward(gradient=torch.ones_like(im) * 1e-3)
-
+        # print("Radius: ", radius)
+        visible = (radius > 0)
+        vis_count = int(visible.sum().item())
+        # print(f"Visible Points: {vis_count} / {num_points}")
         if return_points:
             cur_H = torch.cat([transformed_pts.grad.detach().reshape(num_points, -1),  
                                 opacities.grad.detach().reshape(num_points, -1)], dim=1)

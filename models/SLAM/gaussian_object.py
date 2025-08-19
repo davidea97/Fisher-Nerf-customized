@@ -198,6 +198,23 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     if tracking and use_sil_for_loss:
         mask = mask & presence_sil_mask
 
+
+    # Consider object mask if available
+    obj_mask_2d = curr_data.get('obj_mask_2d', None)
+    if obj_mask_2d is not None:
+        # atteso (H,W) bool su stessa device/shape di depth
+        if obj_mask_2d.dtype != torch.bool:
+            obj_mask_2d = obj_mask_2d.bool()
+        if obj_mask_2d.ndim == 3:  # (H,W,1) -> (H,W)
+            obj_mask_2d = obj_mask_2d.squeeze(-1)
+        # if obj_mask_2d.shape != mask.shape[-2:]:
+        #     obj_mask_2d = F.interpolate(obj_mask_2d[None,None].float(), size=mask.shape[-2:], mode='nearest').bool().squeeze()
+
+        # applica AND su tutte le maschere
+        mask = mask & obj_mask_2d.unsqueeze(0)              # (1,H,W)
+        presence_sil_mask = presence_sil_mask & obj_mask_2d # (H,W)
+
+
     color_mask = torch.tile(mask, (3, 1, 1))
     color_mask = color_mask.detach()
 
@@ -301,7 +318,25 @@ def add_new_gaussians(config, params, variables, curr_data, sil_thres,
     gt_depth = curr_data['depth'][0, :, :]
     render_depth = depth_sil[0, :, :]
     depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > densify_dict["depth_error_ratio"] * depth_error.median())
+    
+    # Added for handling object mask
+    obj_mask_2d = curr_data.get('obj_mask_2d', None)
+    if obj_mask_2d is not None:
+        if obj_mask_2d.dtype != torch.bool:
+            obj_mask_2d = obj_mask_2d.bool()
+
+        valid_for_stats = (gt_depth > 0) & obj_mask_2d
+    else:
+        valid_for_stats = (gt_depth > 0)
+
+    # Evita mediana su insiemi vuoti
+    if valid_for_stats.any():
+        depth_err_med = depth_error[valid_for_stats].median()
+    else:
+        depth_err_med = depth_error[(gt_depth > 0)].median()
+    
+    
+    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > densify_dict["depth_error_ratio"] * depth_err_med)
     # Determine non-presence mask
     non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
     # Flatten mask
@@ -579,12 +614,13 @@ class GaussianObjectSLAM:
         curr_data = {'cam': self.cam, 
                      'im': color, 
                      'depth': depth, 
+                     'obj_mask_2d': obj_mask_2d,
                      'id': iter_time_idx, 
                      'intrinsics': self.intrinsics, 
                      'w2c': self.first_frame_w2c, 
                      'iter_gt_w2c_list': self.gt_w2c_all_frames}
 
-        # import pdb; pdb.set_trace()
+        # Initialize the camera pose for the current frame if not using ground truth poses
         if time_idx > 0 and not self.config['tracking']['use_gt_poses']:
             optimizer = self.get_optimizer(tracking=True)
             self.initialize_camera_pose(time_idx, forward_prop=self.config['tracking']['forward_prop'])
@@ -650,6 +686,7 @@ class GaussianObjectSLAM:
                     else:
                         break
 
+        # Initialize the camera pose for the current frame using ground truth poses
         elif time_idx > 0 and self.config['tracking']['use_gt_poses']:
                 # Get the ground truth pose relative to frame 0
                 rel_w2c = self.gt_w2c_all_frames[-1]    # Let's take the last frame as the GT pose
@@ -671,7 +708,6 @@ class GaussianObjectSLAM:
                 self.params, self.variables = add_new_gaussians(self.config, self.params, self.variables, densify_curr_data, 
                                                       self.config['mapping']['sil_thres'], time_idx,
                                                       self.config['mean_sq_dist_method'], self.config['mapping']['densify_dict'],
-                                                      obj_mask_2d=obj_mask_2d,
                                                       add_rand_gaussians=self.config.mapping.add_rand_gaussians, downsample_pcd=self.config["downsample_pcd"])
                                                       
                 post_num_pts = self.params['means3D'].shape[0]
@@ -1528,6 +1564,10 @@ class GaussianObjectSLAM:
         im, radius, _, = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
         im.backward(gradient=torch.ones_like(im) * 1e-3)
 
+        print("Radius: ", radius)
+        visible = (radius > 0)
+        vis_count = int(visible.sum().item())
+        print(f"Visible Points: {vis_count} / {num_points}")
         if return_points:
             cur_H = torch.cat([transformed_pts.grad.detach().reshape(num_points, -1),  
                                 opacities.grad.detach().reshape(num_points, -1)], dim=1)
@@ -1544,7 +1584,7 @@ class GaussianObjectSLAM:
         if not return_pose:
             return cur_H
         else:
-            return cur_H, torch.eye(6).cuda()
+            return cur_H, torch.eye(6).cuda(), vis_count
     
     def get_latest_frame(self):
         """
