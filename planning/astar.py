@@ -38,8 +38,10 @@ class AstarPlanner:
 
         self.K = slam_config["explore"]["sample_view_num"]
         self.radius = slam_config["explore"]["sample_range"]
+        self.radius_object = slam_config["explore_object"]["sample_range"]
         self.eval_dir = eval_dir
         self.min_range = slam_config["explore"]["min_range"]
+        self.min_range_object = slam_config["explore_object"]["min_range"]
         self.occ_map_np = None
 
         self.centering = slam_config["explore"]["centering"]
@@ -544,8 +546,6 @@ class AstarPlanner:
 
         pts = gaussian_points
 
-        # occ_map non serve qui; ci limitiamo ai gaussiani
-
         # mondo -> pixel (u,v) = (x_idx, y_idx)
         map_coords = map_utils.discretize_coords(
             pts[:, 0],   # x
@@ -554,15 +554,17 @@ class AstarPlanner:
             self.cell_size,
             self.map_center
         )  # (K,2)
-
+        map_coords_unique, counts = torch.unique(map_coords, dim=0, return_counts=True)
+        map_coords_unique = map_coords_unique[counts > 3]  # (N,2) [u,v] = [x_idx,y_idx]
         # mask oggetto (H,W) senza alcuna morfologia
         H, W = self.grid_dim[1], self.grid_dim[0]
         object_mask = np.zeros((H, W), dtype=np.uint8)
 
-        uv = map_coords.detach().cpu().numpy().astype(int)
+        uv = map_coords_unique.detach().cpu().numpy().astype(int)
         uv[:, 0] = np.clip(uv[:, 0], 0, W - 1)
         uv[:, 1] = np.clip(uv[:, 1], 0, H - 1)
         object_mask[uv[:, 1], uv[:, 0]] = 1  # [y, x] = [v, u]
+        
 
         # se non ci sono pixel accesi → None
         if object_mask.sum() == 0:
@@ -709,6 +711,7 @@ class AstarPlanner:
             candidate_pos, free_space = self.build_vlm_frontiers(slam, gaussian_points)
         else:
             candidate_pos, free_space = self.build_frontiers(gaussian_points)
+            # select_pixels_world, free_space = self.build_object_frontiers(gaussian_points)
             use_frontier = candidate_pos is not None
 
             # this is frontier mode, return directly
@@ -812,23 +815,22 @@ class AstarPlanner:
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
 
+            # for w_pose in select_pixels_world:
+            #     cand = w_pose
+            #     if isinstance(cand, torch.Tensor):
+            #         cand = cand.detach().cpu().numpy()
+            #     # prendi il primo punto se è (K,2/3)
+            #     if cand.ndim == 2:
+            #         cand = cand[0]
+            #     # usa [x,z]
+            #     if cand.shape[0] >= 3:
+            #         cx, cz = float(cand[0]), float(cand[2])
+            #     else:
+            #         cx, cz = float(cand[0]), float(cand[1])
 
-            cand = candidate_pos
-            if isinstance(cand, torch.Tensor):
-                cand = cand.detach().cpu().numpy()
-            # prendi il primo punto se è (K,2/3)
-            if cand.ndim == 2:
-                cand = cand[0]
-            # usa [x,z]
-            if cand.shape[0] >= 3:
-                cx, cz = float(cand[0]), float(cand[2])
-            else:
-                cx, cz = float(cand[0]), float(cand[1])
-
-            cpt = self.convert_to_map([cx, cz])
-            # marker magenta (cerchio pieno + bordo + croce)
-            vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 6, (255, 0, 255), -1)
-
+            #     cpt = self.convert_to_map([cx, cz])
+            #     # marker magenta (cerchio pieno + bordo + croce)
+            #     vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 6, (255, 0, 255), -1)
 
 
             os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
@@ -974,7 +976,7 @@ class AstarPlanner:
 
         return poses, scores, random_gaussian_params
     
-    def global_object_planning(self, pose_evaluation_fn:Callable = None, gaussian_points = None, 
+    def global_object_planning(self, pose_evaluation_fn:Callable = None, gaussian_points = None, gaussian_points_scene=None, 
                         goal_proposal_fn:Callable = None, expansion=1, visualize=True, 
                         agent_pose=None):
         """ 
@@ -990,9 +992,9 @@ class AstarPlanner:
         # build frontiers
         print(">> Global Object Planning")
         
-        candidate_pos, free_space = self.build_frontiers(gaussian_points)
-        select_pixels_world, free_space = self.build_object_frontiers(gaussian_points)
-        use_frontier = candidate_pos is not None
+        candidate_pos, free_space = self.build_frontiers(gaussian_points_scene)
+        candidate_obj_pos, _ = self.build_object_frontiers(gaussian_points)
+        use_frontier = candidate_obj_pos is not None
 
         # this is frontier mode, return directly
         if pose_evaluation_fn is None and not use_frontier:
@@ -1000,27 +1002,27 @@ class AstarPlanner:
     
         # generate random gaussians
         if self.add_random_gaussians:
-            random_gaussian_params = self.generate_random_gaussians(candidate_pos)
+            random_gaussian_params = self.generate_random_gaussians(candidate_obj_pos)
         else:
             random_gaussian_params = None
 
         # propose goals when no frontiers exist
-        if candidate_pos is None and goal_proposal_fn is not None:
+        if candidate_obj_pos is None and goal_proposal_fn is not None:
             # propose goals
-            candidate_pos = goal_proposal_fn(self.K, self.cam_height)
+            candidate_obj_pos = goal_proposal_fn(self.K, self.cam_height)
 
         # extract goals
         candidate_pose = []
-        if candidate_pos is not None:
+        if candidate_obj_pos is not None:
             # centering
-            if isinstance(candidate_pos, np.ndarray):
-                candidate_pos = torch.from_numpy(candidate_pos).cuda()
+            if isinstance(candidate_obj_pos, np.ndarray):
+                candidate_obj_pos = torch.from_numpy(candidate_obj_pos).cuda()
             if self.centering:
-                candidate_pos = torch.mean(candidate_pos, dim=0, keepdim=True)
+                candidate_obj_pos = torch.mean(candidate_obj_pos, dim=0, keepdim=True)
 
             # sample poses
             while len(candidate_pose) == 0:
-                candidate_pose = self.generate_candidate(candidate_pos, expansion)
+                candidate_pose = self.generate_candidate_object(candidate_obj_pos, expansion)
                 # expand the radius
                 expansion *= 1.5
             
@@ -1096,22 +1098,22 @@ class AstarPlanner:
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
             
             
-            cand = candidate_pos
-            if isinstance(cand, torch.Tensor):
-                cand = cand.detach().cpu().numpy()
-            # prendi il primo punto se è (K,2/3)
-            if cand.ndim == 2:
-                cand = cand[0]
-            # usa [x,z]
-            if cand.shape[0] >= 3:
-                cx, cz = float(cand[0]), float(cand[2])
-            else:
-                cx, cz = float(cand[0]), float(cand[1])
+            # for w_pose in candidate_obj_pos:
+            #     cand = w_pose
+            #     if isinstance(cand, torch.Tensor):
+            #         cand = cand.detach().cpu().numpy()
+            #     # prendi il primo punto se è (K,2/3)
+            #     if cand.ndim == 2:
+            #         cand = cand[0]
+            #     # usa [x,z]
+            #     if cand.shape[0] >= 3:
+            #         cx, cz = float(cand[0]), float(cand[2])
+            #     else:
+            #         cx, cz = float(cand[0]), float(cand[1])
 
-            cpt = self.convert_to_map([cx, cz])
-            # cpt = np.array([cx, cz])
-            # marker magenta (cerchio pieno + bordo + croce)
-            vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 2, (255, 0, 255), -1)
+            #     cpt = self.convert_to_map([cx, cz])
+            #     # marker magenta (cerchio pieno + bordo + croce)
+            #     vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 1, (255, 0, 255), -1)
 
             os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
             plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
@@ -1176,6 +1178,50 @@ class AstarPlanner:
         # radius = min( radius * (self.selection + 1), 5 )
         theta = torch.rand((K, )).cuda() * 2 * torch.pi
         random_radius = self.min_range + torch.rand((K, )).cuda() * (radius - self.min_range)
+
+        # sample K points from center point with replacement.
+        center_point_height = torch.ones((center_point.shape[0], ), device=center_point.device) * self.cam_height
+        center_point = torch.stack([center_point[:, 0], center_point_height, center_point[:, 1]], dim=1)
+        center_point_rand_index = torch.randint(0, center_point.shape[0], (K, ))
+        center_point = center_point[center_point_rand_index]
+
+        cam_pos = torch.zeros((K, 3)).cuda()
+        cam_pos[:, 0] = center_point[:, 0] + random_radius * torch.sin(theta)
+        cam_pos[:, 1] = self.cam_height # keep the same height
+        cam_pos[:, 2] = center_point[:, 2] + random_radius * torch.cos(theta)
+
+        # Random generate camera rotation
+        cam_rot = torch.zeros((K, 4)).cuda()
+        
+        # theta = torch.atan2(-random_offset[:, 0], -random_offset[:, 2])
+        theta = theta + torch.pi
+        
+        cam_rot[:, 0] = torch.cos(theta / 2)
+        cam_rot[:, 2] = torch.sin(theta / 2)
+        cam_R = build_rotation(cam_rot)
+
+        # Rotate along z-axis to let y-axis facing downward.
+        cam_R[:, :, 0] *= -1
+        cam_R[:, :, 1] *= -1
+
+        c2ws = torch.zeros((K, 4, 4)).cuda()
+        c2ws[:, :3, 3] = cam_pos
+        c2ws[:, :3, :3] = cam_R
+        c2ws[:, 3, 3] = 1.
+
+        return c2ws
+
+    def generate_candidate_object(self, center_point:torch.Tensor, expansion=1):
+        """ 
+        sample camera poses from the center point, 
+        Args:
+            center_point: (K, 3) tensor, the local from which camera poses are sampled
+        """
+
+        K, radius = self.K, self.radius_object * expansion
+        # radius = min( radius * (self.selection + 1), 5 )
+        theta = torch.rand((K, )).cuda() * 2 * torch.pi
+        random_radius = self.min_range_object + torch.rand((K, )).cuda() * (radius - self.min_range_object)
 
         # sample K points from center point with replacement.
         center_point_height = torch.ones((center_point.shape[0], ), device=center_point.device) * self.cam_height

@@ -40,7 +40,9 @@ cfg.planning_queue_size = 40
 cfg.num_frames = 800
 cfg.checkpoint_interval = 40
 cfg.keyframe_every = 4
+cfg.keyframe_obj_every = 1
 cfg.map_every = 10
+cfg.map_obj_every = 1
 cfg.downsample_pcd = 1
 cfg.mapping_window_size = 32
 
@@ -145,6 +147,10 @@ cfg.explore.grid_multipler = 3
 cfg.explore.centering = True
 cfg.explore.shortcut_path = True
 cfg.explore.frontier_select_method = "largest"
+
+cfg.explore_object = CN()
+cfg.explore_object.sample_range = 3.0
+cfg.explore_object.min_range = 1.0
 
 # parameters for the Gaussian Splatting SLAM paper
 cfg.SLAM = CN()

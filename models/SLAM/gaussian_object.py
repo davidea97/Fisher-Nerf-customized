@@ -43,6 +43,35 @@ color_mapping_3 = {
     2:np.array([0,255,0]), # green
 }
 
+def to_o3d_pointcloud(point_cld: torch.Tensor, assume_rgb_0_255=True) -> o3d.geometry.PointCloud:
+    """
+    point_cld: torch.Tensor (N,6) [x,y,z,r,g,b]
+    assume_rgb_0_255: se True, converte colori da [0..255] a [0..1]
+    """
+    pc = point_cld.detach().cpu().numpy()
+    xyz = pc[:, :3].astype(np.float32)
+    rgb = pc[:, 3:6].astype(np.float32)
+
+    if assume_rgb_0_255:
+        # clamp e normalizza in [0,1]
+        rgb = np.clip(rgb, 0, 255) / 255.0
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz)
+    pcd.colors = o3d.utility.Vector3dVector(rgb)
+    return pcd
+
+def save_pointcloud_o3d(filename: str, point_cld: torch.Tensor, binary=True) -> bool:
+    """
+    Salva un PLY/PCD/XYZ con Open3D.
+    Ritorna True/False se il salvataggio è andato a buon fine.
+    """
+    pcd = to_o3d_pointcloud(point_cld, assume_rgb_0_255=True)
+    # Nota: Open3D capisce l'estensione dal filename: .ply, .pcd, .xyz, .xyzn, .xyzrgb, .pts
+    # Per PLY ASCII: write_ascii=True (binary=False); per PLY binario: write_ascii=False (binary=True)
+    return o3d.io.write_point_cloud(filename, pcd, write_ascii=not binary, compressed=False)
+
+
 def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, downsample=1, 
                    mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
     """
@@ -93,6 +122,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, downsample
     cols = torch.permute(downsampled_color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
     point_cld = torch.cat((pts, cols), -1)
 
+
     # Select points based on mask
     if mask is not None:
         downsampled_mask = mask.reshape(color.shape[1], color.shape[2])
@@ -100,7 +130,11 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, downsample
         downsampled_mask = F.max_pool2d(downsampled_mask.unsqueeze(0).float(), downsample).bool()
         downsampled_mask = rearrange(downsampled_mask, "b h w -> (b h w)") 
         if downsampled_mask.sum() > 0:
+            
             point_cld = point_cld[downsampled_mask]
+            ok_ds4 = save_pointcloud_o3d("pcl_down4_obj.ply", point_cld, binary=True)
+            print("Saved down4:", ok_ds4)
+
             if compute_mean_sq_dist:
                 mean3_sq_dist = mean3_sq_dist[downsampled_mask]
         else:
@@ -325,22 +359,14 @@ def add_new_gaussians(config, params, variables, curr_data, sil_thres,
         if obj_mask_2d.dtype != torch.bool:
             obj_mask_2d = obj_mask_2d.bool()
 
-        valid_for_stats = (gt_depth > 0) & obj_mask_2d
-    else:
-        valid_for_stats = (gt_depth > 0)
-
-    # Evita mediana su insiemi vuoti
-    if valid_for_stats.any():
-        depth_err_med = depth_error[valid_for_stats].median()
-    else:
-        depth_err_med = depth_error[(gt_depth > 0)].median()
     
-    
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > densify_dict["depth_error_ratio"] * depth_err_med)
+    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > densify_dict["depth_error_ratio"] * depth_error.median())
     # Determine non-presence mask
     non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
+    # Combine with object mask if available
+    combined_depth_mask = non_presence_mask & obj_mask_2d
     # Flatten mask
-    non_presence_mask = non_presence_mask.reshape(-1)
+    non_presence_mask = combined_depth_mask.reshape(-1)
     # Filter Depth
     valid_depth_mask = (curr_data['depth'][0, :, :] > 0.01)
     non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
@@ -515,8 +541,9 @@ class GaussianObjectSLAM:
         else:
             merged_mask_2d = depth_mask
 
+        
         init_pt_cld, mean3_sq_dist = get_pointcloud(color, depth, densify_intrinsics, w2c, 
-                                                    mask=merged_mask_2d, compute_mean_sq_dist=True, downsample = self.config["downsample_pcd"],
+                                                    mask=merged_mask_2d, compute_mean_sq_dist=True, downsample = 1,
                                                     mean_sq_dist_method="projective")
 
         # Initialize Parameters
@@ -698,7 +725,7 @@ class GaussianObjectSLAM:
                 self.params['cam_trans'][..., time_idx] = rel_w2c_tran
 
         ############ Mapping ############
-        if time_idx == 0 or (time_idx+1) % self.config['map_every'] == 0:
+        if time_idx == 0 or (time_idx+1) % self.config['map_obj_every'] == 0:
             # Densification
             if self.config['mapping']['add_new_gaussians'] and time_idx > 0:
                 # Setup Data for Densification
@@ -821,7 +848,7 @@ class GaussianObjectSLAM:
             # self.visualize_frame(time_idx, curr_data, time_idx)
 
         # Add frame to keyframe list
-        if ((time_idx == 0)  or  ((time_idx+1) % self.config['keyframe_every'] == 0) or \
+        if ((time_idx == 0)  or  ((time_idx+1) % self.config['keyframe_obj_every'] == 0) or \
                     (time_idx == self.config["num_frames"] - 2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
             with torch.no_grad():
                 # Get the current estimated rotation & translation
@@ -1564,7 +1591,7 @@ class GaussianObjectSLAM:
         im, radius, _, = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
         im.backward(gradient=torch.ones_like(im) * 1e-3)
 
-        print("Radius: ", radius)
+        # print("Radius: ", radius)
         visible = (radius > 0)
         vis_count = int(visible.sum().item())
         print(f"Visible Points: {vis_count} / {num_points}")

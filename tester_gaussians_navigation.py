@@ -573,7 +573,7 @@ class NavTester(object):
         w2c_t = torch.linalg.inv(c2w_t)
         # resume SLAM system if neededs
         slam = GaussianSLAM(self.slam_config)
-        slam.init(img, depth, w2c_t)
+        slam.init(img, depth, c2w_t)
 
         # resume from slam
         # DAVIDE
@@ -987,7 +987,7 @@ class NavTester(object):
                     if self.init_object_slam:
                         # Initialize object SLAM 
                         obj_slam = GaussianObjectSLAM(self.slam_config)   # TODO: create a new config for object SLAM
-                        obj_slam.init(img, depth, w2c_t, obj_mask_t)
+                        obj_slam.init(img, depth, c2w_t, obj_mask_t)
                         self.init_object_policy(obj_slam, c2w, intrinsics, object_mask_bw)
 
                         # self.init_object_slam_done = True
@@ -995,8 +995,8 @@ class NavTester(object):
                     # obj_2d_img = mask_border_contact(object_mask_bw)
                     # print("Border contact:", obj_2d_img) 
                     
-                    temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
-                    print("POINTS: ", temp_obj_W_pts)
+                    # temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
+                    # print("POINTS object: ", temp_obj_W_pts)
                     # temp_obj_center = estimate_object_center(temp_obj_W_pts)
                     # print("Estimated object center: ", temp_obj_center)
                     ate_obj = obj_slam.track_rgbd(img, depth, w2c_t, action_id, obj_mask_t)
@@ -1029,8 +1029,9 @@ class NavTester(object):
                         
                         try:
                             print(">> Planning the best path for object reconstruction")
+                            # print("Guassian points: ", obj_slam.gaussian_points)
                             best_path, best_map_path, best_goal, best_world_path, \
-                                    best_global_path, global_points, EIGs = self.plan_best_object_path(obj_slam, current_agent_pose, expansion, t, goal_pose)
+                                    best_global_path, global_points, EIGs = self.plan_best_object_path(obj_slam, slam, current_agent_pose, expansion, t, goal_pose)
                             
                             if best_path is None:
                                 logger.warn(f"time_step {t}, no valid path found, re-plan")
@@ -1606,7 +1607,7 @@ class NavTester(object):
 
         return best_path, best_map_path, best_goal, best_world_path, best_global_path, global_points, EIGs
 
-    def plan_best_object_path(self, obj_slam: GaussianObjectSLAM, 
+    def plan_best_object_path(self, obj_slam: GaussianObjectSLAM, slam: GaussianSLAM, 
                        current_agent_pose: np.array, 
                        expansion:int,  t: int, last_goal = None):
         """ Path & Action planning 
@@ -1629,12 +1630,13 @@ class NavTester(object):
         """
         current_agent_pos = current_agent_pose[:3, 3]
         gaussian_points = obj_slam.gaussian_points
+        gaussian_points_scene = slam.gaussian_points
         
         # global plan -- select global 
         pose_proposal_fn = None if not hasattr(obj_slam, "pose_proposal") else getattr(obj_slam, "pose_proposal")
         print("Start global planning for object")
         global_points, EIGs, random_gaussian_params = \
-            self.policy.global_object_planning(obj_slam.pose_eval, gaussian_points, pose_proposal_fn, \
+            self.policy.global_object_planning(obj_slam.pose_eval, gaussian_points, gaussian_points_scene, pose_proposal_fn, \
                                         expansion=expansion, visualize=True, \
                                         agent_pose=current_agent_pos)#, last_goal=last_goal, slam=obj_slam)
         print(f"Found {len(global_points)} global points: ")

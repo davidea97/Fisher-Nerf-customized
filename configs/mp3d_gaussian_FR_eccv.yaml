@@ -110,3 +110,7 @@ explore:
   shortcut_path: True
   add_random_gaussians: True
   frontier_select_method: "combined"
+
+explore_object:
+  sample_range: 3.0
+  min_range: 1.0

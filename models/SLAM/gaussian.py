@@ -43,6 +43,35 @@ color_mapping_3 = {
     2:np.array([0,255,0]), # green
 }
 
+def to_o3d_pointcloud(point_cld: torch.Tensor, assume_rgb_0_255=True) -> o3d.geometry.PointCloud:
+    """
+    point_cld: torch.Tensor (N,6) [x,y,z,r,g,b]
+    assume_rgb_0_255: se True, converte colori da [0..255] a [0..1]
+    """
+    pc = point_cld.detach().cpu().numpy()
+    xyz = pc[:, :3].astype(np.float32)
+    rgb = pc[:, 3:6].astype(np.float32)
+
+    if assume_rgb_0_255:
+        # clamp e normalizza in [0,1]
+        rgb = np.clip(rgb, 0, 255) / 255.0
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz)
+    pcd.colors = o3d.utility.Vector3dVector(rgb)
+    return pcd
+
+def save_pointcloud_o3d(filename: str, point_cld: torch.Tensor, binary=True) -> bool:
+    """
+    Salva un PLY/PCD/XYZ con Open3D.
+    Ritorna True/False se il salvataggio è andato a buon fine.
+    """
+    pcd = to_o3d_pointcloud(point_cld, assume_rgb_0_255=True)
+    # Nota: Open3D capisce l'estensione dal filename: .ply, .pcd, .xyz, .xyzn, .xyzrgb, .pts
+    # Per PLY ASCII: write_ascii=True (binary=False); per PLY binario: write_ascii=False (binary=True)
+    return o3d.io.write_point_cloud(filename, pcd, write_ascii=not binary, compressed=False)
+
+
 def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, downsample=1, 
                    mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
     """
@@ -101,6 +130,8 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, downsample
         downsampled_mask = rearrange(downsampled_mask, "b h w -> (b h w)") 
         if downsampled_mask.sum() > 0:
             point_cld = point_cld[downsampled_mask]
+            ok_ds4 = save_pointcloud_o3d("pcl_down4.ply", point_cld, binary=True)
+            print("Saved down4:", ok_ds4)
             if compute_mean_sq_dist:
                 mean3_sq_dist = mean3_sq_dist[downsampled_mask]
         else:
