@@ -995,7 +995,8 @@ class NavTester(object):
                     # obj_2d_img = mask_border_contact(object_mask_bw)
                     # print("Border contact:", obj_2d_img) 
                     
-                    # temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
+                    temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
+                    print("POINTS: ", temp_obj_W_pts)
                     # temp_obj_center = estimate_object_center(temp_obj_W_pts)
                     # print("Estimated object center: ", temp_obj_center)
                     ate_obj = obj_slam.track_rgbd(img, depth, w2c_t, action_id, obj_mask_t)
@@ -2071,7 +2072,7 @@ class NavTester(object):
         
         if self.action_queue is None:
             self.habvis.reset()
-            habvis_size = 512 if not hasattr(self, "policy") else self.policy.grid_dim[0]
+            habvis_size = 768 if not hasattr(self, "policy") else self.policy.grid_dim[0]
             if self.dynamic_scene:
                 self.habvis.set_map(self.habitat_ds.sim.sim, habvis_size, dynamic_scene=self.dynamic_scene, sim_obj=self.sim_obj)
             else:

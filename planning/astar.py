@@ -214,6 +214,43 @@ class AstarPlanner:
 
         self.occ_map += occ_map / (occ_map.sum(dim=0, keepdim=True) + 1e-5)
 
+    def build_connected_occupied_space(self, gaussian_points=None):
+        
+        prob, index = self.occ_map.max(dim=0)
+        
+        index = index.cpu().numpy()
+        free_space = (index == 2)
+        occupied_space = (index == 1)
+
+        # project 3D gaussians to build frontiers
+        # height_range = self.config["explore"]["height_range"]
+        if gaussian_points is not None:
+            # lower_y, upper_y = self.cam_height - 1.0, self.cam_height
+            selected_points = gaussian_points
+            map_coords = map_utils.discretize_coords(selected_points[:, 0], selected_points[:, 2], self.grid_dim, self.cell_size, self.map_center)
+            unique_values, counts = torch.unique(map_coords, dim=0, return_counts=True)
+            # add 25 filter; since tha gaussians points might block narrow hallway.
+
+            unique_values = unique_values.cpu().numpy()
+            occupied_space[unique_values[:, 1], unique_values[:, 0]] = 1
+
+        # perform Open morph on free space
+        kernel = np.ones((3, 3), np.uint8)
+        occupied_space = cv2.morphologyEx(occupied_space.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+
+        # get the connected region of the current robot
+        _, labels, stats, centroid = cv2.connectedComponentsWithStats(occupied_space.astype(np.uint8))
+        
+        # select the one with largest size
+        label_index = np.argsort(stats[:, 4])
+
+        # largest forground label
+        robot_label = label_index[-1] if label_index[-1] != 0 else label_index[-2]
+        occupied_space = (labels == robot_label).astype(np.uint8)
+
+        # free_space = cv2.erode(free_space.astype(np.uint8), np.ones((3, 3), np.uint8))
+        return occupied_space
+    
     def build_connected_freespace(self, gaussian_points=None):
         """ find the connected free space to the robot 
         
@@ -321,21 +358,21 @@ class AstarPlanner:
         # find the unknown area
         prob, index = self.occ_map.max(dim=0)
         index = index.cpu().numpy()
-        unkown = (index == 0)
+        unknown = (index == 0)
 
         map_center = self.map_center.cpu().numpy()
         # perform dilation
         kernel = np.ones((3, 3), np.uint8)
         free_space_dilate = cv2.dilate(free_space.astype(np.uint8), kernel, iterations=1)
         boundary = free_space_dilate - free_space
-        frontier = np.bitwise_and(boundary, unkown)
+        frontier = np.bitwise_and(boundary, unknown)
         self.frontier = frontier
 
+        # If no frontier found, return None
         if frontier.sum() == 0:
             self.target_frontier = None
             return None, free_space
         
-        # no dilation
         kernel = np.ones((3, 3), np.uint8)  
         frontier = cv2.dilate(frontier.astype(np.uint8), kernel, iterations=1) 
         
@@ -453,6 +490,99 @@ class AstarPlanner:
 
         return frontier_point, free_space
 
+    def object_ground_points(self, gaussian_points):
+        """
+        Ritorna i punti a terra (XZ) dell'oggetto.
+        gaussian_points: torch.Tensor [N,3] o np.ndarray [N,3] in world (Habitat: y=up)
+        Output:
+        xz : np.ndarray [N,2] con colonne [x, z]
+        """
+        if isinstance(gaussian_points, torch.Tensor):
+            gp = gaussian_points.detach().cpu().numpy()
+        else:
+            gp = np.asarray(gaussian_points)
+        if gp.size == 0:
+            return np.empty((0,2), dtype=np.float32)
+        return gp[:, [0, 2]].astype(np.float32)
+    
+    def object_ground_center(self, xz_points, robust=True):
+        """
+        Calcola il centro al suolo (X,Z) dei punti oggetto.
+        robust=True -> mediana (meno sensibile a outlier); False -> media.
+        Ritorna center_w: np.array([x, y_ground, z]) per comodità.
+        """
+        if xz_points.size == 0:
+            return None
+        if robust:
+            cx, cz = np.median(xz_points, axis=0)
+        else:
+            cx, cz = np.mean(xz_points, axis=0)
+        y_ground = getattr(self, "ground_y", 0.0)  # metti qui l’altezza “terra” che vuoi usare
+        return np.array([cx, y_ground, cz], dtype=np.float32)
+    
+    def build_object_center(self, gaussian_points = None):
+        """ Return frontiers in pixel space  """
+        # find the connected free space
+        free_space = self.build_connected_freespace(gaussian_points)
+        xz = self.object_ground_points(gaussian_points)
+        center_w = self.object_ground_center(xz, robust=True)
+        candidate_xz = np.array([[center_w[0], center_w[2]]], dtype=np.float32)
+        print("Candidate XZ Center:", candidate_xz)
+
+        frontier_point = candidate_xz
+
+        return frontier_point, free_space
+    
+    def build_object_frontiers(self, gaussian_points, use_convex_hull=True):
+
+        # free space, per coerenza con build_frontiers (lo ritorniamo alla fine)
+        free_space = self.build_connected_freespace(gaussian_points)
+
+        # guardie
+        if gaussian_points is None or gaussian_points.numel() == 0:
+            return None, free_space
+
+        pts = gaussian_points
+
+        # occ_map non serve qui; ci limitiamo ai gaussiani
+
+        # mondo -> pixel (u,v) = (x_idx, y_idx)
+        map_coords = map_utils.discretize_coords(
+            pts[:, 0],   # x
+            pts[:, 2],   # z
+            self.grid_dim,
+            self.cell_size,
+            self.map_center
+        )  # (K,2)
+
+        # mask oggetto (H,W) senza alcuna morfologia
+        H, W = self.grid_dim[1], self.grid_dim[0]
+        object_mask = np.zeros((H, W), dtype=np.uint8)
+
+        uv = map_coords.detach().cpu().numpy().astype(int)
+        uv[:, 0] = np.clip(uv[:, 0], 0, W - 1)
+        uv[:, 1] = np.clip(uv[:, 1], 0, H - 1)
+        object_mask[uv[:, 1], uv[:, 0]] = 1  # [y, x] = [v, u]
+
+        # se non ci sono pixel accesi → None
+        if object_mask.sum() == 0:
+            return None, free_space
+
+        # prendi TUTTI i pixel dell'oggetto (come per le frontiere)
+        select_pixels = np.stack(np.where(object_mask), axis=1)  # (N,2) [y, x]
+        # switch a [x, y]
+        select_pixels = select_pixels[:, [1, 0]]
+
+        # pixel -> mondo (stessa formula di build_frontiers)
+        map_center = self.map_center.cpu().numpy() if torch.is_tensor(self.map_center) else np.asarray(self.map_center)
+        select_pixels_world = (
+            (select_pixels - np.array([[self.grid_dim[0] // 2, self.grid_dim[1] // 2]]))
+            * float(self.cell_size)
+            + map_center[None, :]
+        )  # (N,2) [x,z]
+
+        return select_pixels_world, free_space
+    
     def visualize_map(self, c2w, world_goal_point = None, path = None, global_path = None):
         prob, index = self.occ_map.max(dim=0)
         map_center = self.map_center.cpu().numpy()
@@ -681,6 +811,26 @@ class AstarPlanner:
             # agent position
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+
+
+            cand = candidate_pos
+            if isinstance(cand, torch.Tensor):
+                cand = cand.detach().cpu().numpy()
+            # prendi il primo punto se è (K,2/3)
+            if cand.ndim == 2:
+                cand = cand[0]
+            # usa [x,z]
+            if cand.shape[0] >= 3:
+                cx, cz = float(cand[0]), float(cand[2])
+            else:
+                cx, cz = float(cand[0]), float(cand[1])
+
+            cpt = self.convert_to_map([cx, cz])
+            # marker magenta (cerchio pieno + bordo + croce)
+            vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 6, (255, 0, 255), -1)
+
+
+
             os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
             plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
             plt.close()
@@ -841,6 +991,7 @@ class AstarPlanner:
         print(">> Global Object Planning")
         
         candidate_pos, free_space = self.build_frontiers(gaussian_points)
+        select_pixels_world, free_space = self.build_object_frontiers(gaussian_points)
         use_frontier = candidate_pos is not None
 
         # this is frontier mode, return directly
@@ -943,6 +1094,25 @@ class AstarPlanner:
             # agent position
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+            
+            
+            cand = candidate_pos
+            if isinstance(cand, torch.Tensor):
+                cand = cand.detach().cpu().numpy()
+            # prendi il primo punto se è (K,2/3)
+            if cand.ndim == 2:
+                cand = cand[0]
+            # usa [x,z]
+            if cand.shape[0] >= 3:
+                cx, cz = float(cand[0]), float(cand[2])
+            else:
+                cx, cz = float(cand[0]), float(cand[1])
+
+            cpt = self.convert_to_map([cx, cz])
+            # cpt = np.array([cx, cz])
+            # marker magenta (cerchio pieno + bordo + croce)
+            vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 2, (255, 0, 255), -1)
+
             os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
             plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
             plt.close()
@@ -957,7 +1127,7 @@ class AstarPlanner:
 
         # log the topk candidates
         self.previous_candidates = poses
-        print("Poses: ", poses.shape, "Scores: ", scores.shape)
+        # print("Poses: ", poses.shape, "Scores: ", scores.shape)
         return poses, scores, random_gaussian_params
     
     def generate_random_gaussians(self, candidate_pos):
