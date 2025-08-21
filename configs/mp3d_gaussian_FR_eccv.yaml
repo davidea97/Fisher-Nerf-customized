@@ -16,6 +16,7 @@ checkpoint_interval: 1000
 forward_step_size: 0.065
 turn_angle: 10.
 path_end_weight: 30.
+object_path_end_weight: 100.
 opacity_pixel_weight: 0.0001
 
 report_global_progress_every: 10
@@ -112,5 +113,6 @@ explore:
   frontier_select_method: "combined"
 
 explore_object:
-  sample_range: 3.0
+  sample_range: 2.5
   min_range: 1.0
+  sample_view_num: 64

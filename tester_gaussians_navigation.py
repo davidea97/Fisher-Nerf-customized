@@ -67,7 +67,7 @@ import pyrender
 from scripts.evaluation import load_glb_pointcloud, load_ply_pointcloud, apply_transform_to_pointcloud, get_latest_pcl_file, save_pointcloud_as_ply
 from scripts.eval_3d_reconstruction import accuracy_comp_ratio_from_pcl
 
-from utils.object_reconstruction_utils import mask_border_contact, estimate_object_center, object_center_error, object_size_ratio
+from utils.object_reconstruction_utils import mask_border_contact, estimate_object_center, object_center_error, object_size_ratio, reached
 
 # FORMAT = "%(pathname)s:%(lineno)d %(message)s"
 OBJ_SCALE_FACTOR = 0.7
@@ -201,7 +201,7 @@ class NavTester(object):
         self.init_object_slam_done = False
         self.action_queue = None  # Queue for actions to be executed by the policy
 
-        self.gaussian_optimization = gaussian_optimization
+        # self.gaussian_optimization = gaussian_optimization
 
         if self.options.max_steps != self.slam_config["num_frames"]:
             logger.warn(f"max_steps {self.options.max_steps} != self.slam_config['num_frames'] {self.slam_config['num_frames']}, override self.options")
@@ -689,15 +689,15 @@ class NavTester(object):
 
                         # self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, camera_pose, object_pose, keep_ratio=0.05, step=t)
 
-                    if self.dino_extraction:
-                        dino_descriptors, selected_coord = extract_dino_features(rgb_bgr, object_mask_bw, dino_extractor)
-                        if dino_descriptors.shape[0] == 0:
-                            print("DINO descriptors are empty!")
-                        else:
-                            all_dino_descriptors.append(dino_descriptors)
-                            all_images.append(rgb_bgr)
-                            all_selected_coord.append(selected_coord)
-                            print("Dino descriptors shape: ", dino_descriptors.shape)
+                    # if self.dino_extraction:
+                    #     dino_descriptors, selected_coord = extract_dino_features(rgb_bgr, object_mask_bw, dino_extractor)
+                    #     if dino_descriptors.shape[0] == 0:
+                    #         print("DINO descriptors are empty!")
+                    #     else:
+                    #         all_dino_descriptors.append(dino_descriptors)
+                    #         all_images.append(rgb_bgr)
+                    #         all_selected_coord.append(selected_coord)
+                    #         print("Dino descriptors shape: ", dino_descriptors.shape)
 
                 # Save current rgb, depth, semantic, camera pose
                 if self.save_data:
@@ -721,7 +721,7 @@ class NavTester(object):
                         )
            
                 rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-                self.store_filtered_pointcloud(rgb, depth_raw, intrinsics, camera_pose, keep_ratio=1.00, step=t)
+                # self.store_filtered_pointcloud(rgb, depth_raw, intrinsics, camera_pose, keep_ratio=1.00, step=t)
 
                 c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
                 c2w_t = torch.from_numpy(c2w).float().cuda()
@@ -729,7 +729,7 @@ class NavTester(object):
                 
                 # print("Camera pose: ", camera_pose)
                 # print("C2W new: ", c2w)
-                if self.gaussian_optimization:
+                if self.policy_name == "gaussians_based":
                     ate = slam.track_rgbd(img, depth, w2c_t, action_id)
 
                     if ate is not None:
@@ -986,7 +986,7 @@ class NavTester(object):
                     # obj_mask_t = torch.from_numpy(object_mask_bw).unsqueeze(-1).bool().cuda()
                     if self.init_object_slam:
                         # Initialize object SLAM 
-                        obj_slam = GaussianObjectSLAM(self.slam_config)   # TODO: create a new config for object SLAM
+                        obj_slam = GaussianObjectSLAM(self.slam_config, cur_frame_idx=slam.cur_frame_idx-1)   # TODO: create a new config for object SLAM
                         obj_slam.init(img, depth, c2w_t, obj_mask_t)
                         self.init_object_policy(obj_slam, c2w, intrinsics, object_mask_bw)
 
@@ -995,7 +995,7 @@ class NavTester(object):
                     # obj_2d_img = mask_border_contact(object_mask_bw)
                     # print("Border contact:", obj_2d_img) 
                     
-                    # temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
+                    temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
                     # print("POINTS object: ", temp_obj_W_pts)
                     # temp_obj_center = estimate_object_center(temp_obj_W_pts)
                     # print("Estimated object center: ", temp_obj_center)
@@ -1646,7 +1646,7 @@ class NavTester(object):
         sort_index = np.argsort(EIGs)[::-1]
         global_points = global_points[sort_index]
         EIGs = EIGs[sort_index]
-        
+        print("Sorted global points by EIG: ", EIGs[:10])
         if self.cfg.num_uniform_H_train > 0:
             uiform_positions, uiform_quants = self.uniform_rand_poses()
             H_train = None
@@ -1672,7 +1672,7 @@ class NavTester(object):
         valid_path = 0
 
         # plan actions for each global goal
-        valid_global_pose, path_actions, paths_arr = self.action_planning(global_points, current_agent_pose, obj_slam.gaussian_points, t)
+        valid_global_pose, path_actions, paths_arr = self.action_planning_object(global_points, current_agent_pose, slam.gaussian_points, t)
         logger.info(f"Evaluate path actions: {len(path_actions)}")
         total_path_EIGs = []
 
@@ -1733,7 +1733,7 @@ class NavTester(object):
                     map_path.append(map_coord)
 
             if self.cfg.path_end_weight > 0:
-                total_path_EIG = total_path_EIG / len(curr_action) + self.cfg.path_end_weight * final_EIG
+                total_path_EIG = total_path_EIG / len(curr_action) + self.cfg.object_path_end_weight * final_EIG
             else:
                 total_path_EIG = (total_path_EIG + final_EIG) / len(curr_action)
             
@@ -1792,11 +1792,11 @@ class NavTester(object):
 
             finish = self.policy.convert_to_map(pos_np[[0, 2]])[[1, 0]] # convert to z-x
             # print("Finish: ", finish)
-            paths = self.policy.planning(finish) # A* Planning in [x, z]
 
+            paths = self.policy.planning(finish) # A* Planning in [x, z] TODO: try also other planning methods
             if len(paths) == 0:
                 continue
-            
+
             future_pose = current_agent_pose.copy()
 
             # set to cam height
@@ -1820,12 +1820,11 @@ class NavTester(object):
                 # compute action
                 rel_pos = np.linalg.inv(future_pose) @ stage_goal_w
                 xz_rel_pos = rel_pos[[0, 2]]
-                
+                # print("Distance to stage goal: ", np.linalg.norm(xz_rel_pos), "Stage goal idx: ", stage_goal_idx)
                 if np.linalg.norm(xz_rel_pos) < self.slam_config["forward_step_size"]:
                     stage_goal_idx += 1 
                     if stage_goal_idx == len(paths):
                         # change orientation
-
                         angle = np.rad2deg(math.atan2(pose_np[0, 2], pose_np[2, 2])) - \
                                 np.rad2deg(math.atan2(future_pose[0, 2], future_pose[2, 2]))
 
@@ -1886,6 +1885,221 @@ class NavTester(object):
         
         return valid_global_points, path_actions, paths_arr
 
+    def action_planning_object(self, global_points, current_agent_pose, gaussian_points, t):
+        """
+        Plan sequences of actions for each goal poses
+
+        Args:
+            global_points (np.array): (N, 4, 4) goal poses
+            current_agent_pose (np.array): (4, 4) current agent pose
+            gaussian_points: Gaussian Points from MonoGS
+            t: time step
+
+        Return:
+            valid_global_points (List[np.array]): valid goal poses
+            path_actions: List[List[int]]: action for each goal
+            paths_arr: List[] List for each planned path
+        """
+        valid_global_points = []
+        path_actions = []
+        paths_arr = []
+
+        # set start position in A* Planner
+        current_agent_pos = current_agent_pose[:3, 3]
+        start = self.policy.convert_to_map(current_agent_pos[[0, 2]])[[1, 0]] # from x-z to z-x
+        self.policy.setup_start(start, gaussian_points, t)
+        
+        for pose_np in tqdm(global_points, desc="Action Planning"):
+            # print("Planning for pose: ", pose_np)
+            if cm.should_exit():
+                cm.requeue()
+
+            pos_np = pose_np[:3, 3].copy()
+            pos_np[1] = current_agent_pos[1] # set the same heights
+
+            finish = self.policy.convert_to_map(pos_np[[0, 2]])[[1, 0]] # convert to z-x
+            
+            # Paths include the waypoints to the goal
+            paths = self.policy.planning(finish) # A* Planning in [x, z] TODO: try also other planning methods
+            if len(paths) == 0:
+                continue
+
+            future_pose = current_agent_pose.copy()
+
+            # set to cam height
+            future_pose[1, 3] = self.policy.cam_height
+            stage_goal_idx = 1
+
+            # if only rotation
+            if len(paths) == 1:
+                paths = np.concatenate([paths, finish[None, :]], axis=0)
+
+            # current_pos = np.array(paths[0])[[1, 0]] # from z-x to x-z
+            stage_goal = paths[stage_goal_idx]
+            
+            stage_goal_w = self.policy.convert_to_world(stage_goal) # grid cell center
+            stage_goal_w = np.array([stage_goal_w[0], future_pose[1, 3], stage_goal_w[1], 1])
+            path_action = []
+            generate_opposite_turn = False
+            # print("Stage goal: ", stage_goal, "Stage goal world: ", stage_goal_w)
+            # push actions to queue
+            while len(path_action) < self.slam_config["policy"]["planning_queue_size"]:
+                # compute action
+                
+                rel_pos = np.linalg.inv(future_pose) @ stage_goal_w
+                xz_rel_pos = rel_pos[[0, 2]]
+                # print("Distance to stage goal: ", np.linalg.norm(xz_rel_pos), "Stage goal idx: ", stage_goal_idx)
+                if np.linalg.norm(xz_rel_pos) < self.slam_config["forward_step_size"]:
+                    stage_goal_idx += 1 
+                    if stage_goal_idx == len(paths):
+                        # change orientation
+                        angle = np.rad2deg(math.atan2(pose_np[0, 2], pose_np[2, 2])) - \
+                                np.rad2deg(math.atan2(future_pose[0, 2], future_pose[2, 2]))
+
+                        if abs(angle) > 180:
+                            angle = angle - 360 if angle > 0 else angle + 360
+
+                        num_actions = int(abs(angle) // self.slam_config["turn_angle"])
+                        for k in range(num_actions):
+                            if len(path_action) < self.slam_config["policy"]["planning_queue_size"]:
+                                
+                                action = 2 if angle > 0 else 3
+                                future_pose = compute_next_campos(future_pose, action, self.slam_config["forward_step_size"], self.slam_config["turn_angle"])
+
+                                # append action
+                                path_action.append(action)
+
+                            else:
+                                break
+                        
+                        # break 
+                        break
+                    
+                    else:
+                        # move to next stage goal
+                        stage_goal = paths[stage_goal_idx]
+                        stage_goal_w = self.policy.convert_to_world(stage_goal)
+                        stage_goal_w = np.array([stage_goal_w[0], future_pose[1, 3], stage_goal_w[1], 1])
+                        rel_pos = np.linalg.inv(future_pose) @ stage_goal_w
+                        xz_rel_pos = rel_pos[[0, 2]]
+                    
+                angle = np.arctan2(xz_rel_pos[0], xz_rel_pos[1])
+
+                if angle > np.radians(self.slam_config["turn_angle"]):
+                    action = 3
+                elif angle < - np.radians(self.slam_config["turn_angle"]):
+                    action = 2
+                else:
+                    action = 1
+                    
+                future_pose = compute_next_campos(future_pose, action, self.slam_config["forward_step_size"], self.slam_config["turn_angle"])
+                path_action.append(action)
+            
+            # ---------- POST-LOOP: se budget esaurito, completa i waypoint mancanti; poi final approach ----------
+            if len(path_action) >= self.slam_config["policy"]["planning_queue_size"]:
+                step = self.slam_config["forward_step_size"]
+                turn = np.radians(self.slam_config["turn_angle"])
+                SAFETY_CAP = 100
+
+                extra = 0
+                while extra < SAFETY_CAP:
+                    # 1) Se ci sono ancora waypoint da raggiungere, continua a seguirli
+                    if stage_goal_idx < len(paths):
+                        # print("Stage goal idx missing: ", stage_goal_idx, " of ", len(paths))
+                        # usa SEMPRE il centro cella del waypoint
+                        stage_goal = paths[stage_goal_idx]
+                        sg_w = self.policy.convert_to_world(stage_goal + 0.5)
+                        stage_goal_w = np.array([sg_w[0], future_pose[1, 3], sg_w[1], 1.0])
+
+                        rel = np.linalg.inv(future_pose) @ stage_goal_w
+                        xz_rel = rel[[0, 2]]
+                        d_to_wp = np.linalg.norm(xz_rel)
+                        # print("Distance to waypoint: ", d_to_wp)
+                        if d_to_wp < step:
+                            stage_goal_idx += 1
+                            continue  # passa al prossimo waypoint
+                        else:
+                            ang = np.arctan2(xz_rel[0], xz_rel[1])
+                            # print("Angle to waypoint: ", np.rad2deg(ang))
+                            act = 3 if ang >  turn else (2 if ang < -turn else 1)
+                            # print("Action to waypoint: ", act)
+                    # 2) Altrimenti (tutti i waypoint fatti), final approach alla posa target
+                    else:
+                        # distanza planare e differenza yaw verso la posa target
+                        dist = np.linalg.norm(future_pose[[0, 2], 3] - pose_np[[0, 2], 3])
+                        yaw_now  = np.arctan2(future_pose[0, 2], future_pose[2, 2])
+                        yaw_goal = np.arctan2(pose_np[0, 2],    pose_np[2, 2])
+                        dyaw = np.arctan2(np.sin(yaw_goal - yaw_now), np.cos(yaw_goal - yaw_now))
+                        # print("GO TO THE TARGET POSE")
+                        # print("Distance to target: ", dist)
+                        # print("Distance to target yaw: ", np.rad2deg(dyaw))
+                        # criterio di uscita: vicino e allineato
+                        if (dist < 2.0 * step) and (abs(dyaw) <= turn):
+                            break
+
+                        target_w = np.array([pose_np[0, 3], future_pose[1, 3], pose_np[2, 3], 1.0])
+                        rel = np.linalg.inv(future_pose) @ target_w
+                        xz_rel = rel[[0, 2]]
+                        ang = np.arctan2(xz_rel[0], xz_rel[1])
+
+                        # priorità: allineati verso il target, poi avanza
+                        act = 3 if ang >  turn else (2 if ang < -turn else 1)
+
+                    # esegui l’azione scelta
+                    future_pose = compute_next_campos(future_pose, act, step, np.degrees(turn))
+                    path_action.append(act)
+                    extra += 1
+            # ---------- FINE POST-LOOP ----------
+            
+            # # ---------- POST-LOOP: solo se abbiamo saturato il budget, aggiungi il minimo indispensabile ----------
+            # if len(path_action) >= self.slam_config["policy"]["planning_queue_size"]:
+            #     step = self.slam_config["forward_step_size"]
+            #     turn = np.radians(self.slam_config["turn_angle"])
+            #     # target in world (stessa altezza della cam)
+            #     target_w = np.array([pose_np[0, 3], future_pose[1, 3], pose_np[2, 3], 1.0])
+
+            #     # aggiungi SOLO quanto basta per: dist < 2*step e yaw allineato
+            #     SAFETY_CAP = 50  # evita loop infiniti patologic
+            #     extra = 0
+            #     # print("Correcting path to target pose...")
+            #     while extra < SAFETY_CAP:
+            #         # distanza planare al target
+            #         dist = np.linalg.norm(future_pose[[0, 2], 3] - pose_np[[0, 2], 3])
+                    
+            #         # print("Distance to target: ", dist)
+            #         # yaw corrente vs target
+            #         yaw_now = np.arctan2(future_pose[0, 2], future_pose[2, 2])
+            #         yaw_goal = np.arctan2(pose_np[0, 2], pose_np[2, 2])
+            #         dyaw = np.arctan2(np.sin(yaw_goal - yaw_now), np.cos(yaw_goal - yaw_now))
+            #         # print("Distance to target yaw: ", np.rad2deg(dyaw))
+            #         # criterio di uscita: vicino e allineato
+            #         if (dist < 2.0 * step) and (abs(dyaw) <= 0.5 * turn):
+            #             break
+            #         # print("Extra actions: ", extra+1)
+            #         # se non allineato verso il target, gira prima
+            #         rel = np.linalg.inv(future_pose) @ target_w
+            #         xz_rel = rel[[0, 2]]
+            #         ang = np.arctan2(xz_rel[0], xz_rel[1])
+
+            #         if abs(ang) > turn:
+            #             act = 3 if ang > 0 else 2
+            #         else:
+            #             # vai avanti, riduci dist
+            #             act = 1
+
+            #         future_pose = compute_next_campos(future_pose, act, step, np.degrees(turn))
+            #         path_action.append(act)
+            #         extra += 1
+            # # ---------- FINE POST-LOOP ----------
+
+            
+
+            if path_action not in path_actions:
+                path_actions.append(path_action)
+                valid_global_points.append(pose_np)
+                paths_arr.append(paths)
+        
+        return valid_global_points, path_actions, paths_arr
 
     def load_3d_gaussian(self, slam:GaussianSLAM, weight_file):
         time_idx = int(weight_file.split('/')[-1].split('.')[0][6:])

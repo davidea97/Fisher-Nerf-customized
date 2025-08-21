@@ -132,8 +132,8 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, downsample
         if downsampled_mask.sum() > 0:
             
             point_cld = point_cld[downsampled_mask]
-            ok_ds4 = save_pointcloud_o3d("pcl_down4_obj.ply", point_cld, binary=True)
-            print("Saved down4:", ok_ds4)
+            # ok_ds4 = save_pointcloud_o3d("pcl_down4_obj.ply", point_cld, binary=True)
+            # print("Saved down4:", ok_ds4)
 
             if compute_mean_sq_dist:
                 mean3_sq_dist = mean3_sq_dist[downsampled_mask]
@@ -443,7 +443,7 @@ def add_new_gaussians(config, params, variables, curr_data, sil_thres,
 class GaussianObjectSLAM:
     # config = dict()
 
-    def __init__(self, config: CfgNode):
+    def __init__(self, config: CfgNode, cur_frame_idx: int=0):
         """
         params:
             config
@@ -471,6 +471,7 @@ class GaussianObjectSLAM:
         self.eval_dir = os.path.join(self.config["workdir"], self.config["run_name"])
         self.save_dir = self.eval_dir
         self.frame_idx = 0
+        self.cur_frame = cur_frame_idx
         os.makedirs(self.eval_dir, exist_ok=True)
 
         # We don't need to save config again as itg has been saved in the tester.py
@@ -761,8 +762,10 @@ class GaussianObjectSLAM:
                 selected_time_idx.append(time_idx)
                 selected_keyframes.append(-1)
                 # Print the selected keyframes
-                print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
+                print(f"\nSelected Keyframes at Frame {time_idx-1+self.cur_frame}: {[x - 1 + self.cur_frame for x in selected_time_idx]}")
+                # print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
+            # self.cur_frame += 1 # DAVIDE UPDATE
             # Reset Optimizer & Learning Rates for Full Map Optimization
             optimizer = self.get_optimizer(tracking=False) 
             
@@ -1394,7 +1397,7 @@ class GaussianObjectSLAM:
        
     def pose_eval(self, poses, random_gaussian_params=None):
         """ Compute pose scores for the poses """
-        H_train = self.compute_H_train()
+        H_train = self.compute_H_train()    # Information gain matrix for keyframes until now
         H_train_inv = torch.reciprocal(H_train + 0.1)
 
         scores = []
@@ -1407,7 +1410,7 @@ class GaussianObjectSLAM:
 
             self.render_at_pose(c2w, random_gaussian_params)
             
-            view_score = torch.sum(cur_H * H_train_inv).item() 
+            view_score = torch.sum(cur_H * H_train_inv).item() # Aggregated score for the view
             
             scores.append(view_score)
             navigable_c2ws.append(c2w)
@@ -1594,7 +1597,7 @@ class GaussianObjectSLAM:
         # print("Radius: ", radius)
         visible = (radius > 0)
         vis_count = int(visible.sum().item())
-        print(f"Visible Points: {vis_count} / {num_points}")
+        # print(f"Visible Points: {vis_count} / {num_points}")
         if return_points:
             cur_H = torch.cat([transformed_pts.grad.detach().reshape(num_points, -1),  
                                 opacities.grad.detach().reshape(num_points, -1)], dim=1)

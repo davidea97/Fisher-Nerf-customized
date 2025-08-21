@@ -130,8 +130,8 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, downsample
         downsampled_mask = rearrange(downsampled_mask, "b h w -> (b h w)") 
         if downsampled_mask.sum() > 0:
             point_cld = point_cld[downsampled_mask]
-            ok_ds4 = save_pointcloud_o3d("pcl_down4.ply", point_cld, binary=True)
-            print("Saved down4:", ok_ds4)
+            # ok_ds4 = save_pointcloud_o3d("pcl_down4.ply", point_cld, binary=True)
+            # print("Saved down4:", ok_ds4)
             if compute_mean_sq_dist:
                 mean3_sq_dist = mean3_sq_dist[downsampled_mask]
         else:

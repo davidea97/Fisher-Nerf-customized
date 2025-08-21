@@ -15,6 +15,7 @@ cfg.H_pose_weight = 0.5 # weight for logdet(H) on Pose; only used when computing
 cfg.path_pose_weight = 0.2 # weight H_pose on path
 cfg.path_point_weight = 1.0 # weight H_pose on path
 cfg.path_end_weight = 1.0 # weight H_pose on path
+cfg.object_path_end_weight = 1.0 # weight H_pose on path
 cfg.acc_H_train_every = 5
 cfg.num_uniform_H_train = -1
 cfg.opacity_pixel_weight = 0.00001
@@ -40,7 +41,7 @@ cfg.planning_queue_size = 40
 cfg.num_frames = 800
 cfg.checkpoint_interval = 40
 cfg.keyframe_every = 4
-cfg.keyframe_obj_every = 1
+cfg.keyframe_obj_every = 2
 cfg.map_every = 10
 cfg.map_obj_every = 1
 cfg.downsample_pcd = 1
@@ -151,6 +152,7 @@ cfg.explore.frontier_select_method = "largest"
 cfg.explore_object = CN()
 cfg.explore_object.sample_range = 3.0
 cfg.explore_object.min_range = 1.0
+cfg.explore_object.sample_view_num = 64
 
 # parameters for the Gaussian Splatting SLAM paper
 cfg.SLAM = CN()

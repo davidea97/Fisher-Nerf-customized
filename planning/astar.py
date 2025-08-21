@@ -37,6 +37,7 @@ class AstarPlanner:
         self.add_random_gaussians = slam_config["explore"]["add_random_gaussians"]
 
         self.K = slam_config["explore"]["sample_view_num"]
+        self.K_object = slam_config["explore_object"]["sample_view_num"]
         self.radius = slam_config["explore"]["sample_range"]
         self.radius_object = slam_config["explore_object"]["sample_range"]
         self.eval_dir = eval_dir
@@ -342,7 +343,8 @@ class AstarPlanner:
 
         # plt.figure()
         # plt.imshow(self.occ_map_np)
-        # plt.savefig(os.path.join(self.eval_dir, "occmap_{}.png".format(frame_idx)))
+        # os.makedirs(os.path.join(self.eval_dir, "occ_map"), exist_ok=True)
+        # plt.savefig(os.path.join(self.eval_dir, "occ_map", "occmap_{}.png".format(frame_idx)))
         # plt.close()
 
         self.free_space_np = self.build_connected_freespace(gaussian_points)
@@ -492,57 +494,15 @@ class AstarPlanner:
 
         return frontier_point, free_space
 
-    def object_ground_points(self, gaussian_points):
-        """
-        Ritorna i punti a terra (XZ) dell'oggetto.
-        gaussian_points: torch.Tensor [N,3] o np.ndarray [N,3] in world (Habitat: y=up)
-        Output:
-        xz : np.ndarray [N,2] con colonne [x, z]
-        """
-        if isinstance(gaussian_points, torch.Tensor):
-            gp = gaussian_points.detach().cpu().numpy()
-        else:
-            gp = np.asarray(gaussian_points)
-        if gp.size == 0:
-            return np.empty((0,2), dtype=np.float32)
-        return gp[:, [0, 2]].astype(np.float32)
-    
-    def object_ground_center(self, xz_points, robust=True):
-        """
-        Calcola il centro al suolo (X,Z) dei punti oggetto.
-        robust=True -> mediana (meno sensibile a outlier); False -> media.
-        Ritorna center_w: np.array([x, y_ground, z]) per comodità.
-        """
-        if xz_points.size == 0:
-            return None
-        if robust:
-            cx, cz = np.median(xz_points, axis=0)
-        else:
-            cx, cz = np.mean(xz_points, axis=0)
-        y_ground = getattr(self, "ground_y", 0.0)  # metti qui l’altezza “terra” che vuoi usare
-        return np.array([cx, y_ground, cz], dtype=np.float32)
-    
-    def build_object_center(self, gaussian_points = None):
-        """ Return frontiers in pixel space  """
-        # find the connected free space
-        free_space = self.build_connected_freespace(gaussian_points)
-        xz = self.object_ground_points(gaussian_points)
-        center_w = self.object_ground_center(xz, robust=True)
-        candidate_xz = np.array([[center_w[0], center_w[2]]], dtype=np.float32)
-        print("Candidate XZ Center:", candidate_xz)
-
-        frontier_point = candidate_xz
-
-        return frontier_point, free_space
     
     def build_object_frontiers(self, gaussian_points, use_convex_hull=True):
 
         # free space, per coerenza con build_frontiers (lo ritorniamo alla fine)
-        free_space = self.build_connected_freespace(gaussian_points)
+        # free_space = self.build_connected_freespace(gaussian_points)
 
         # guardie
         if gaussian_points is None or gaussian_points.numel() == 0:
-            return None, free_space
+            return None
 
         pts = gaussian_points
 
@@ -568,7 +528,7 @@ class AstarPlanner:
 
         # se non ci sono pixel accesi → None
         if object_mask.sum() == 0:
-            return None, free_space
+            return None
 
         # prendi TUTTI i pixel dell'oggetto (come per le frontiere)
         select_pixels = np.stack(np.where(object_mask), axis=1)  # (N,2) [y, x]
@@ -583,7 +543,7 @@ class AstarPlanner:
             + map_center[None, :]
         )  # (N,2) [x,z]
 
-        return select_pixels_world, free_space
+        return select_pixels_world
     
     def visualize_map(self, c2w, world_goal_point = None, path = None, global_path = None):
         prob, index = self.occ_map.max(dim=0)
@@ -993,7 +953,7 @@ class AstarPlanner:
         print(">> Global Object Planning")
         
         candidate_pos, free_space = self.build_frontiers(gaussian_points_scene)
-        candidate_obj_pos, _ = self.build_object_frontiers(gaussian_points)
+        candidate_obj_pos = self.build_object_frontiers(gaussian_points)
         use_frontier = candidate_obj_pos is not None
 
         # this is frontier mode, return directly
@@ -1009,7 +969,7 @@ class AstarPlanner:
         # propose goals when no frontiers exist
         if candidate_obj_pos is None and goal_proposal_fn is not None:
             # propose goals
-            candidate_obj_pos = goal_proposal_fn(self.K, self.cam_height)
+            candidate_obj_pos = goal_proposal_fn(self.K_object, self.cam_height)
 
         # extract goals
         candidate_pose = []
@@ -1024,7 +984,7 @@ class AstarPlanner:
             while len(candidate_pose) == 0:
                 candidate_pose = self.generate_candidate_object(candidate_obj_pos, expansion)
                 # expand the radius
-                expansion *= 1.5
+                expansion *= 1.5 
             
                 # select goals in freespace
                 eroded_free_space = cv2.erode(free_space.astype(np.uint8), np.ones((10, 10), np.uint8))
@@ -1062,6 +1022,7 @@ class AstarPlanner:
             scores, poses = self.pose_eval(candidate_pose)
         else:
             scores, poses = pose_evaluation_fn(candidate_pose, random_gaussian_params)
+        
         #visualize
         if visualize:
             occ_map = self.occ_map.argmax(0) == 1
@@ -1092,29 +1053,62 @@ class AstarPlanner:
                 pt = self.convert_to_map([pose[0,3],pose[2,3]])
                 vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
                 # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
+            if isinstance(scores, torch.Tensor):
+                best_idx = int(torch.argmax(scores).item())
+            else:
+                best_idx = int(np.argmax(scores))
+
+            best_pose = poses[best_idx]  # shape (4,4)
+
+            # posizione in mondo -> pixel mappa
+            best_pt = self.convert_to_map([best_pose[0, 3].item(), best_pose[2, 3].item()])
+
+            # cv2.circle(vis_map, (best_pt[0], best_pt[1]), 3, (0, 255, 255), -1)  # fill
+            cv2.circle(vis_map, (best_pt[0], best_pt[1]), 4, (255, 255, 255), 2) 
+            
+            R = best_pose[:3, :3]
+            # yaw coerente con il tuo codice (atan2(pose[0,2], pose[2,2]))
+            yaw = np.arctan2(R[0, 2].item(), R[2, 2].item())
+
+            # direzione in XZ (verso "avanti" della camera)
+            dir_x = np.sin(yaw)
+            dir_z = np.cos(yaw)
+
+            # punto di partenza (pixel)
+            start = (best_pt[0], best_pt[1])
+
+            # lunghezza freccia in pixel (regola a piacere)
+            arrow_len = 12
+
+            # converti world->map per l’estremo della freccia
+            end_world_x = best_pose[0, 3].item() + dir_x * (arrow_len * self.cell_size)
+            end_world_z = best_pose[2, 3].item() + dir_z * (arrow_len * self.cell_size)
+            end = self.convert_to_map([end_world_x, end_world_z])
+
+            cv2.arrowedLine(vis_map, start, (end[0], end[1]), (0, 255, 255), 2, tipLength=0.35) 
+            
+            cand = candidate_obj_pos
+            if isinstance(cand, torch.Tensor):
+                cand = cand.detach().cpu().numpy()
+            # prendi il primo punto se è (K,2/3)
+            if cand.ndim == 2:
+                cand = cand[0]
+            # usa [x,z]
+            if cand.shape[0] >= 3:
+                cx, cz = float(cand[0]), float(cand[2])
+            else:
+                cx, cz = float(cand[0]), float(cand[1])
+
+            cpt = self.convert_to_map([cx, cz])
+            # marker magenta (cerchio pieno + bordo + croce)
+            vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 4, (0, 255, 255), 2)
+
 
             # agent position
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
+            cv2.circle(vis_map, (pt[0], pt[1]), 4, (255, 0, 0), 2) 
             vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
             
-            
-            # for w_pose in candidate_obj_pos:
-            #     cand = w_pose
-            #     if isinstance(cand, torch.Tensor):
-            #         cand = cand.detach().cpu().numpy()
-            #     # prendi il primo punto se è (K,2/3)
-            #     if cand.ndim == 2:
-            #         cand = cand[0]
-            #     # usa [x,z]
-            #     if cand.shape[0] >= 3:
-            #         cx, cz = float(cand[0]), float(cand[2])
-            #     else:
-            #         cx, cz = float(cand[0]), float(cand[1])
-
-            #     cpt = self.convert_to_map([cx, cz])
-            #     # marker magenta (cerchio pieno + bordo + croce)
-            #     vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 1, (255, 0, 255), -1)
-
             os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
             plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
             plt.close()
@@ -1218,7 +1212,7 @@ class AstarPlanner:
             center_point: (K, 3) tensor, the local from which camera poses are sampled
         """
 
-        K, radius = self.K, self.radius_object * expansion
+        K, radius = self.K_object, self.radius_object * expansion
         # radius = min( radius * (self.selection + 1), 5 )
         theta = torch.rand((K, )).cuda() * 2 * torch.pi
         random_radius = self.min_range_object + torch.rand((K, )).cuda() * (radius - self.min_range_object)
