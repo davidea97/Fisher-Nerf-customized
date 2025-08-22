@@ -752,7 +752,7 @@ class GaussianObjectSLAM:
                 curr_w2c[:3, 3] = curr_cam_tran
                 # Select Keyframes for Mapping
                 num_keyframes = self.config['mapping_window_size'] - 2
-                selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, self.intrinsics, self.keyframe_list[:-1], num_keyframes)
+                selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, self.intrinsics, self.keyframe_list[:-1], num_keyframes, curr_mask=obj_mask_2d)
                 selected_time_idx = [self.keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
                 if len(self.keyframe_list) > 0:
                     # Add last keyframe to the selected keyframes
@@ -850,9 +850,16 @@ class GaussianObjectSLAM:
 
             # self.visualize_frame(time_idx, curr_data, time_idx)
 
+        ######### Save Keyframes ########
         # Add frame to keyframe list
         if ((time_idx == 0)  or  ((time_idx+1) % self.config['keyframe_obj_every'] == 0) or \
                     (time_idx == self.config["num_frames"] - 2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
+            if obj_mask_2d is not None:
+                kf_mask = (obj_mask_2d > 0).bool()
+                # opzionale: fai detach/copy per sicurezza
+                kf_mask = kf_mask.detach().clone()
+            else:
+                kf_mask = None
             with torch.no_grad():
                 # Get the current estimated rotation & translation
                 curr_cam_rot = F.normalize(self.params['cam_unnorm_rots'][..., time_idx].detach())
@@ -861,7 +868,12 @@ class GaussianObjectSLAM:
                 curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                 curr_w2c[:3, 3] = curr_cam_tran
                 # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                curr_keyframe = {'id': time_idx, 
+                                 'est_w2c': curr_w2c, 
+                                 'color': color, 
+                                 'depth': depth,
+                                 'mask': kf_mask  # 1,H,W bool
+                                 }
                 if self.config.tracking.with_droid:
                     curr_keyframe['droid_depth'] = droid_depth
                     curr_keyframe['droid_color'] = droid_color

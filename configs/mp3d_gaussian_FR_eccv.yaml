@@ -115,4 +115,4 @@ explore:
 explore_object:
   sample_range: 2.5
   min_range: 1.0
-  sample_view_num: 64
+  sample_view_num: 256

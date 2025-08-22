@@ -37,7 +37,7 @@ def get_pointcloud(depth, intrinsics, w2c, sampled_indices):
     return pts
 
 
-def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixels=1600):
+def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, curr_mask=None, pixels=1600):
         """
         Select overlapping keyframes to the current camera observation.
 
@@ -53,9 +53,22 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
         """
         # Radomly Sample Pixel Indices from valid depth pixels
         width, height = gt_depth.shape[2], gt_depth.shape[1]
-        valid_depth_indices = torch.where(gt_depth[0] > 0)
+        
+        # if curr_mask is None:
+        #     valid_depth_indices = torch.where(gt_depth[0] > 0)
+        #     valid_depth_indices = torch.stack(valid_depth_indices, dim=1)
+        #     indices = torch.randint(valid_depth_indices.shape[0], (pixels,))
+        #     sampled_indices = valid_depth_indices[indices]
+        # else:
+        valid = (gt_depth[0] > 0)
+        if curr_mask is not None:
+            valid = valid & curr_mask.bool()
+        valid_depth_indices = torch.where(valid)
         valid_depth_indices = torch.stack(valid_depth_indices, dim=1)
-        indices = torch.randint(valid_depth_indices.shape[0], (pixels,))
+        if valid_depth_indices.shape[0] == 0:
+            return []
+        n = min(pixels, valid_depth_indices.shape[0])
+        indices = torch.randint(valid_depth_indices.shape[0], (n,))
         sampled_indices = valid_depth_indices[indices]
 
         # Back Project the selected pixels to 3D Pointcloud

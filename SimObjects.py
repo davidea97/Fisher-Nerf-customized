@@ -3,15 +3,17 @@ import habitat_sim
 import magnum as mn
 import random
 class SimObject:
-    def __init__(self, habitat_obj, name=None, show_object_axes=False, speed=3.0):
+    def __init__(self, habitat_obj, name=None, show_object_axes=False, speed=3.0, dynamic=False):
         self.obj = habitat_obj
         self.name = name or f"object_{id(habitat_obj)}"
         self.show_object_axes = show_object_axes
         self.is_rotating = False
         self.accumulated_rotation = 0.0  
         self.rotation_step = np.pi / 18
-        # self.obj_linear_velocity = np.array([0.0, 0.0, 2.0])
-        self.obj_linear_velocity = np.array([0.0, 0.0, 0.0])
+        if dynamic:
+            self.obj_linear_velocity = np.array([0.0, 0.0, 2.0])
+        else:
+            self.obj_linear_velocity = np.array([0.0, 0.0, 0.0])
         self.show_object_axes = False
         self.linear_speed = speed
 

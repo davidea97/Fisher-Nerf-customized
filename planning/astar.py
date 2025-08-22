@@ -341,11 +341,55 @@ class AstarPlanner:
         # set occ map np
         self.occ_map_np = binarymap
 
-        # plt.figure()
-        # plt.imshow(self.occ_map_np)
-        # os.makedirs(os.path.join(self.eval_dir, "occ_map"), exist_ok=True)
-        # plt.savefig(os.path.join(self.eval_dir, "occ_map", "occmap_{}.png".format(frame_idx)))
-        # plt.close()
+        # ========= VISUALIZZAZIONE GAUSSIANI SULLA OCC MAP =========
+        try:
+            os.makedirs(os.path.join(self.eval_dir, "occ_map"), exist_ok=True)
+
+            # base: occ_map PRIMA della dilatazione, utile per capire dove scriviamo le celle
+            base_occ = (self.occ_map.argmax(dim=0) == 1).cpu().numpy().astype(np.uint8)
+
+            # colore: da binario -> RGB (bianco = occupato, nero = libero)
+            vis = np.zeros((base_occ.shape[0], base_occ.shape[1], 3), dtype=np.uint8)
+            vis[base_occ != 0] = (255, 255, 255)
+
+            # se abbiamo gaussian_points, proiettiamoli per plotting
+            if gaussian_points is not None and sign.any():
+                # coords di TUTTI i gaussiani selezionati (altezza nel range)
+                all_uv = map_coords.detach().cpu().numpy()  # (N,2) [x_idx, y_idx]
+                # clip a bordo
+                all_uv[:, 0] = np.clip(all_uv[:, 0], 0, self.grid_dim[0]-1)
+                all_uv[:, 1] = np.clip(all_uv[:, 1], 0, self.grid_dim[1]-1)
+
+                # coords che superano la soglia counts>50 (quelle che hai usato per settare occupato)
+                unique_uv = unique_values.detach().cpu().numpy()
+                unique_uv[:, 0] = np.clip(unique_uv[:, 0], 0, self.grid_dim[0]-1)
+                unique_uv[:, 1] = np.clip(unique_uv[:, 1], 0, self.grid_dim[1]-1)
+
+                # Disegna i gaussiani proiettati (tutti) in CIANO
+                for x, y in all_uv:
+                    cv2.circle(vis, (int(x), int(y)), 1, (255, 255, 0), -1)  # BGR: (0,255,255) ma invertito -> (255,255,0)
+
+                # Disegna quelli sopra soglia (magenta) per evidenziare cosa hai marcato occupato
+                # Nota: qui usiamo counts>50 come in occ_map[...] = 1
+                keep = (counts > 50).detach().cpu().numpy()
+                uv_th = unique_uv[keep]
+                for x, y in uv_th:
+                    cv2.circle(vis, (int(x), int(y)), 2, (255, 0, 255), -1)  # magenta
+
+            # start (ricorda: start è in [y, x])
+            cv2.drawMarker(vis, (int(self.start[1]), int(self.start[0])), (255, 0, 0),
+                           markerType=cv2.MARKER_TILTED_CROSS, markerSize=10, thickness=2)  # blu
+
+            # anche la mappa dopo la dilatazione come reference
+            vis_dil = np.zeros((binarymap.shape[0], binarymap.shape[1], 3), dtype=np.uint8)
+            vis_dil[binarymap != 0] = (255, 255, 255)
+
+            # salva
+            import matplotlib.pyplot as plt
+            plt.imsave(os.path.join(self.eval_dir, "occ_map", f"occmap_gaussians_raw_{frame_idx}.png"), vis[..., ::-1])     # BGR->RGB
+            plt.imsave(os.path.join(self.eval_dir, "occ_map", f"occmap_after_dilate_{frame_idx}.png"), vis_dil)
+        except Exception as e:
+            print("[WARN] Plot gaussians on occ map failed:", e)
 
         self.free_space_np = self.build_connected_freespace(gaussian_points)
 
@@ -1053,6 +1097,7 @@ class AstarPlanner:
                 pt = self.convert_to_map([pose[0,3],pose[2,3]])
                 vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
                 # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
+            
             if isinstance(scores, torch.Tensor):
                 best_idx = int(torch.argmax(scores).item())
             else:
@@ -1087,6 +1132,7 @@ class AstarPlanner:
 
             cv2.arrowedLine(vis_map, start, (end[0], end[1]), (0, 255, 255), 2, tipLength=0.35) 
             
+
             cand = candidate_obj_pos
             if isinstance(cand, torch.Tensor):
                 cand = cand.detach().cpu().numpy()
