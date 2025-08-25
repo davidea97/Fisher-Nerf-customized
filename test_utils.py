@@ -10,6 +10,11 @@ from scipy.spatial.transform import Rotation as SciR
 import habitat_sim
 from habitat.utils.visualizations import maps
 from sklearn.metrics import confusion_matrix
+from scripts.evaluation import save_pointcloud_as_ply
+import cv2
+import trimesh
+from scipy.spatial import cKDTree
+
 
 def draw_map(sim, height, meters_per_pixel = 0.1, use_sim=False, map_res=768):
     """
@@ -291,3 +296,346 @@ class AverageMeter(object):
     def __str__(self):
         fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
         return fmtstr.format(**self.__dict__)
+    
+
+
+
+# DAVIDE
+@torch.no_grad()
+def render_expected_depth_from_pcd(pcd_world: torch.Tensor, c2w_t: torch.Tensor, K_t: torch.Tensor, img_hw, z_forward="-Z"):
+    H, W = img_hw
+    device, dtype = pcd_world.device, pcd_world.dtype
+    K_t = K_t[:3, :3]
+    w2c_t = torch.linalg.inv(c2w_t)
+    N = pcd_world.shape[0]
+    ones = torch.ones((N,1), device=device, dtype=dtype)
+    Pw_h = torch.cat([pcd_world, ones], dim=1).t()
+    Pc = (w2c_t @ Pw_h)[:3].t()  # (N,3)
+    save_pointcloud_as_ply(Pc, "gt_scene_pcl_wrt_cam.ply")
+    if z_forward == "+Z" or z_forward == "Z":
+        depth_vals = Pc[:,2]; in_front = depth_vals > 0.05
+    else:  # "-Z" tipico Habitat/OpenGL
+        depth_vals = -Pc[:,2]; in_front = depth_vals > 0.05
+        Pc = Pc.clone(); Pc[:,2] *= -1
+
+    if in_front.sum().item() == 0:
+        return torch.full((H,W), float('inf'), device=device, dtype=dtype), 0
+
+    Pc = Pc[in_front]; dval = depth_vals[in_front]
+    uv_h = (K_t @ Pc.t()).t()
+    u = torch.round(uv_h[:,0] / uv_h[:,2]).long()
+    v = torch.round(uv_h[:,1] / uv_h[:,2]).long()
+    valid = (u>=0)&(u<W)&(v>=0)&(v<H)
+    if valid.sum().item() == 0:
+        return torch.full((H,W), float('inf'), device=device, dtype=dtype), 0
+
+    u = u[valid]; v = v[valid]; dval = dval[valid]
+    lin = v * W + u
+    sort = torch.argsort(lin)
+    lin = lin[sort]; dval = dval[sort]
+    first = torch.ones_like(lin, dtype=torch.bool, device=device); first[1:] = lin[1:] != lin[:-1]
+    z_exp = torch.full((H*W,), float('inf'), device=device, dtype=dtype); z_exp[lin[first]] = dval[first]
+    return z_exp.view(H, W), int(torch.isfinite(z_exp).sum().item())
+
+def render_env_depth_by_raycast(mesh: trimesh.Trimesh,
+                                c2w_4x4: np.ndarray,
+                                K_3x3: np.ndarray,
+                                img_hw,
+                                z_forward: str = "-Z",
+                                stride: int = 2):
+    H, W = int(img_hw[0]), int(img_hw[1])
+    # intersector (pyembree se c'è, altrimenti fallback)
+    try:
+        from trimesh.ray.ray_pyembree import RayMeshIntersector
+        rmi = RayMeshIntersector(mesh)
+    except Exception:
+        from trimesh.ray.ray_triangle import RayMeshIntersector
+        rmi = RayMeshIntersector(mesh)
+
+    uu, vv = np.meshgrid(np.arange(0, W, stride), np.arange(0, H, stride))
+    uv = np.stack([uu.ravel(), vv.ravel(), np.ones_like(uu).ravel()], axis=0).astype(np.float64)  # (3,N)
+
+    Kinv = np.linalg.inv(K_3x3.astype(np.float64))
+    dirs_cam = (Kinv @ uv).T
+    dirs_cam /= (np.linalg.norm(dirs_cam, axis=1, keepdims=True) + 1e-12)
+
+    if z_forward in ("-Z", "-z"):  # Habitat-style
+        dirs_cam = dirs_cam.copy()
+        dirs_cam[:, 2] *= -1.0
+
+    T = np.asarray(c2w_4x4, dtype=np.float64)
+    R, t = T[:3, :3], T[:3, 3]
+    ray_origins    = np.repeat(t[None, :], dirs_cam.shape[0], axis=0)
+    ray_directions = (R @ dirs_cam.T).T  # (N,3)
+
+    # distanza euclidea al primo impatto
+    try:
+        t_hit = rmi.intersects_first(ray_origins, ray_directions)  # (N,) float, -1 se miss
+    except Exception:
+        ids = rmi.intersects_id(ray_origins, ray_directions, multiple_hits=False)
+        t_hit = np.full((ray_origins.shape[0],), -1.0, dtype=np.float64)
+        if ids is not None and len(ids) > 0:
+            idx = ids[0]
+            loc = rmi.intersects_location(ray_origins[idx], ray_directions[idx])[0]
+            d = np.linalg.norm(loc - ray_origins[idx], axis=1)
+            t_hit[idx] = d
+
+    # converti distanza lungo raggio in profondità z (asse camera)
+    cos_z = dirs_cam[:, 2].clip(min=1e-12)  # già flippato se -Z
+    z_samples = np.where(t_hit > 0, t_hit * cos_z, np.inf)
+
+    z_env = np.full((H, W), np.inf, dtype=np.float64)
+    z_env[vv.ravel(), uu.ravel()] = z_samples
+    if stride > 1:
+        # opzionale: upsample nearest-neighbor
+        import cv2
+        z_env = cv2.resize(z_env, (W, H), interpolation=cv2.INTER_NEAREST)
+    return z_env
+
+def check_camera_pose_wrt_map_with_mesh(env_mesh,        # trimesh.Trimesh già nel world giusto
+                                        c2w_t,           # torch (4x4)
+                                        inv_K_t,         # torch (3x3 o 4x4)
+                                        depth_np,        # np (H,W)
+                                        img_hw,
+                                        z_forward="-Z",
+                                        tau_m=0.03,
+                                        stride=2,
+                                        frame_id=0):
+    import torch, numpy as np, cv2, os
+
+    device = c2w_t.device; dtype = c2w_t.dtype
+    H, W = img_hw
+    save_mask_path = os.path.join("extracted_mask_from_mesh", f"novelty_mask_{frame_id}.png")
+    # K 3x3 in numpy
+    K = torch.linalg.inv(inv_K_t.to(device=device, dtype=dtype))[:3, :3].detach().cpu().numpy()
+    # c2w in numpy
+    c2w = c2w_t.detach().cpu().numpy()
+
+    # depth attesa con occlusioni (mesh)
+    z_env = render_env_depth_by_raycast(env_mesh, c2w, K, (H, W), z_forward=z_forward, stride=stride)  # np (H,W)
+
+    # osservata
+    z_obs = torch.from_numpy(depth_np).to(device=device, dtype=dtype)
+    z_env_t = torch.from_numpy(z_env).to(device=device, dtype=dtype)
+
+    obs_valid = torch.isfinite(z_obs) & (z_obs > 0)
+    env_hit   = torch.isfinite(z_env_t)
+
+    # NOVEL: ambiente prevede superficie a distanza z_env, ma vedo qualcosa più vicino
+    cond = obs_valid & env_hit & ((z_obs + tau_m) < z_env_t)
+    novelty_mask = (cond.detach().cpu().numpy().astype(np.uint8)) * 255
+
+    if save_mask_path is not None:
+        os.makedirs(os.path.dirname(save_mask_path), exist_ok=True)
+        cv2.imwrite(save_mask_path, novelty_mask)
+        print("[novel] salvata:", save_mask_path)
+
+    # metriche (dove c'è overlap valido)
+    overlap = (env_hit.detach().cpu().numpy()) & (obs_valid.detach().cpu().numpy())
+    if overlap.any():
+        delta = (z_env_t - z_obs)[overlap]
+        mae  = float(torch.mean(torch.abs(delta)).item())
+        rmse = float(torch.sqrt(torch.mean(delta**2)).item())
+    else:
+        mae = rmse = float("nan")
+
+    return {"overlap_px": int(overlap.sum()), "mae": mae, "rmse": rmse}, novelty_mask
+
+def check_camera_pose_wrt_map(gt_3d_oriented_w: torch.Tensor,
+                              c2w_t: torch.Tensor,
+                              inv_K_t: torch.Tensor,
+                              depth_np: np.ndarray,
+                              img_hw,
+                              z_forward="-Z",
+                              tau_m=0.03, save_ply=True, frame_id=0):
+    
+    device = c2w_t.device; dtype = c2w_t.dtype
+    K_t = torch.linalg.inv(inv_K_t.to(device=device, dtype=dtype))
+    z_exp, valid_px = render_expected_depth_from_pcd(gt_3d_oriented_w.to(device=device, dtype=dtype), c2w_t, K_t, img_hw, z_forward=z_forward)
+    H, W = img_hw
+    if save_ply:
+        save_expected_and_observed_depth_as_ply(
+            z_exp=z_exp,
+            depth_np=depth_np,
+            inv_K_t=inv_K_t,
+            c2w_t=c2w_t,
+            img_hw=(H, W),
+            out_dir=os.path.join("ply_depths"),
+            z_forward=z_forward,
+            stride=2, frame_id=frame_id
+        )
+
+    z_obs = torch.from_numpy(depth_np).to(device=device, dtype=dtype)
+    valid = torch.isfinite(z_exp) & torch.isfinite(z_obs)
+    if valid.sum().item() == 0:
+        print("[pose-check] nessuna sovrapposizione valida.")
+        return {"valid_px": 0}
+    delta = (z_exp - z_obs)[valid]
+    mae = torch.mean(torch.abs(delta)).item()
+    rmse = torch.sqrt(torch.mean(delta**2)).item()
+    inlier = torch.mean((torch.abs(delta) < tau_m).float()).item()
+    print(f"[pose-check] valid_px={valid_px} | MAE={mae:.3f} m | RMSE={rmse:.3f} m | Inliers(|Δ|<{tau_m*100:.0f}cm)={inlier*100:.1f}%")
+
+    novelty = torch.zeros_like(z_exp, dtype=torch.bool)
+    cond = valid & ((z_obs+0.5) < z_exp)
+    novelty[cond] = True
+    novelty_mask = novelty.detach().cpu().numpy().astype(np.uint8) * 255  # (H,W) 0/255
+    save_mask_path = os.path.join("extracted_mask", f"novelty_mask_{frame_id}.png")
+    os.makedirs(os.path.dirname(save_mask_path), exist_ok=True)
+    cv2.imwrite(save_mask_path, novelty_mask)
+    print(f"[pose-check] salvata novelty mask: {save_mask_path}")
+
+    return {"valid_px": int(valid_px), "mae": mae, "rmse": rmse, "inlier": inlier}
+
+@torch.no_grad()
+def novelty_mask_from_pcd_nn(env_pcd_xyz: torch.Tensor,     # torch (N,3) WORLD
+                             depth_np: np.ndarray,          # (H,W) float32 [m]
+                             inv_K_t: torch.Tensor,         # torch (3x3 o 4x4)
+                             c2w_t: torch.Tensor,           # torch (4x4)
+                             img_hw,                        # (H, W)
+                             z_forward: str = "-Z",
+                             dist_thresh_m: float = 0.05,   # 5 cm
+                             stride: int = 1,               # sottocampionamento per velocità
+                             frame_id: int = 0):
+    """
+    Genera una mask BN (H,W) dove 255 = punto osservato non spiegato dalla PCD ambiente entro dist_thresh_m.
+    Usa NN (cKDTree) sull'ambiente: veloce e senza raycasting.
+    """
+    import cv2, os
+
+    H, W = int(img_hw[0]), int(img_hw[1])
+
+    # --- back-project osservato -> punti WORLD (sottocampionati) ---
+    device = c2w_t.device
+    dtype  = c2w_t.dtype
+    z_obs  = torch.from_numpy(depth_np).to(device=device, dtype=dtype)
+
+    uu, vv = torch.meshgrid(
+        torch.arange(0, W, stride, device=device),
+        torch.arange(0, H, stride, device=device),
+        indexing="xy"
+    )
+    d = z_obs[vv, uu]
+    valid = torch.isfinite(d) & (d > 0)
+    save_mask_path = os.path.join("extracted_mask", f"novelty_mask_{frame_id}.png")
+    if valid.sum().item() == 0:
+        mask = np.zeros((H, W), dtype=np.uint8)
+        return mask
+
+    u = uu[valid].float()
+    v = vv[valid].float()
+    d = d[valid]
+
+    K_t = torch.linalg.inv(inv_K_t.to(device=device, dtype=dtype))[:3, :3]
+    Kinv = torch.linalg.inv(K_t)
+
+    rays = (Kinv @ torch.stack([u, v, torch.ones_like(u)], dim=0)).t()  # (M,3)
+    Pc   = rays * d.unsqueeze(1)
+    if z_forward in ("-Z", "-z"):
+        Pc = Pc.clone(); Pc[:, 2] *= -1
+
+    ones = torch.ones((Pc.shape[0], 1), device=device, dtype=dtype)
+    Pw   = (c2w_t @ torch.cat([Pc, ones], dim=1).t()).t()[:, :3]        # (M,3) WORLD
+
+    # --- KDTree su env PCD (CPU) ---
+    P_env = env_pcd_xyz.detach().cpu().numpy()
+    tree  = cKDTree(P_env)
+
+    P_obs = Pw.detach().cpu().numpy()
+    dists, _ = tree.query(P_obs, k=1, workers=-1)  # veloce
+
+    novel_flags = dists > dist_thresh_m  # (M,)
+
+    # --- ricostruisci mask BN su (H,W) ---
+    Hs = (H + stride - 1) // stride
+    Ws = (W + stride - 1) // stride
+    mask_sub = np.zeros((Hs, Ws), dtype=np.uint8)
+
+    # indice booleano 2D (subsampled) dei pixel validi
+    valid_sub = valid.detach().cpu().numpy()                  # (Hs, Ws)
+    mask_sub[valid_sub] = novel_flags                         # assegna solo nei True
+
+    # upsample alla risoluzione piena
+    # mask = cv2.resize(mask_sub * 255, (W, H), interpolation=cv2.INTER_NEAREST)
+    mask = mask_sub
+    # Check enough novel pixels
+    min_novel_px = 20
+    if (mask > 0).sum() < min_novel_px:
+        return np.zeros((H, W), dtype=np.uint8)
+
+    return mask
+
+
+@torch.no_grad()
+def save_expected_and_observed_depth_as_ply(z_exp: torch.Tensor,
+                                            depth_np,                 # numpy (H,W)
+                                            inv_K_t: torch.Tensor,    # (3,3) o (4,4) torch
+                                            c2w_t: torch.Tensor,      # (4,4) torch
+                                            img_hw,                   # (H, W)
+                                            out_dir: str,
+                                            z_forward: str = "-Z",
+                                            stride: int = 2,
+                                            frame_id: int = 0):
+    """
+    Salva due PLY (expected/observed) back-proiettando z_exp e depth osservata.
+    - z_forward: usa "-Z" per convenzione OpenGL/Habitat, "+Z" per pinhole classico.
+    - stride: sottocampionamento pixel (2=prende 1 px ogni 2 per asse).
+    Output: out_dir/expected.ply, out_dir/observed.ply
+    """
+    import numpy as np
+    import open3d as o3d
+
+    device = c2w_t.device
+    dtype  = c2w_t.dtype
+    H, W   = int(img_hw[0]), int(img_hw[1])
+
+    # Tensors coerenti su device
+    z_exp = z_exp.to(device=device, dtype=dtype)
+    z_obs = torch.from_numpy(depth_np).to(device=device, dtype=dtype)
+
+    K_t = torch.linalg.inv(inv_K_t.to(device=device, dtype=dtype))
+    K_t = K_t[:3, :3]
+    Kinv = torch.linalg.inv(K_t)
+
+    # griglia sottocampionata
+    uu, vv = torch.meshgrid(
+        torch.arange(0, W, stride, device=device),
+        torch.arange(0, H, stride, device=device),
+        indexing="xy"
+    )
+
+    def depth_to_world_points(z_map: torch.Tensor):
+        d = z_map[vv, uu]
+        valid = torch.isfinite(d) & (d > 0)
+        if valid.sum().item() == 0:
+            return torch.empty((0,3), device=device, dtype=dtype)
+        u = uu[valid].float()
+        v = vv[valid].float()
+        d = d[valid]
+        rays = (Kinv @ torch.stack([u, v, torch.ones_like(u)], dim=0)).t()  # (N,3)
+        Pc = rays * d.unsqueeze(1)
+        if z_forward == "-Z":
+            Pc = Pc.clone(); Pc[:,2] *= -1
+        Pc_h = torch.cat([Pc, torch.ones((Pc.shape[0],1), device=device, dtype=dtype)], dim=1).t()
+        Pw = (c2w_t @ Pc_h).t()[:, :3]
+        return Pw
+
+    Pw_exp = depth_to_world_points(z_exp)
+    Pw_obs = depth_to_world_points(z_obs)
+
+    os.makedirs(out_dir, exist_ok=True)
+    if Pw_exp.shape[0] > 0:
+        pcd_e = o3d.geometry.PointCloud()
+        pcd_e.points = o3d.utility.Vector3dVector(Pw_exp.detach().cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(out_dir, f"expected_{frame_id}.ply"), pcd_e)
+    else:
+        print("[PLY] expected: nessun punto valido.")
+
+    if Pw_obs.shape[0] > 0:
+        pcd_o = o3d.geometry.PointCloud()
+        pcd_o.points = o3d.utility.Vector3dVector(Pw_obs.detach().cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(out_dir, f"observed_{frame_id}.ply"), pcd_o)
+    else:
+        print("[PLY] observed: nessun punto valido.")
+
+    print(f"[PLY] salvati in: {out_dir}/expected.ply e {out_dir}/observed.ply")

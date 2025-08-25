@@ -44,7 +44,7 @@ from habitat.core.simulator import AgentState
 
 from configs.base_config import get_cfg_defaults
 import datasets.util.utils as utils
-from test_utils import draw_map, set_agent_state
+from test_utils import draw_map, set_agent_state, check_camera_pose_wrt_map, novelty_mask_from_pcd_nn, check_camera_pose_wrt_map_with_mesh
 
 import shutil
 import logging
@@ -64,10 +64,11 @@ from frontier_exploration.map import *
 
 import trimesh
 import pyrender
-from scripts.evaluation import load_glb_pointcloud, load_ply_pointcloud, apply_transform_to_pointcloud, get_latest_pcl_file, save_pointcloud_as_ply
+from scripts.evaluation import load_glb_pointcloud, load_ply_pointcloud, apply_transform_to_pointcloud, get_latest_pcl_file, save_pointcloud_as_ply, load_env_glb_pointcloud, concat_mesh_from_glb
 from scripts.eval_3d_reconstruction import accuracy_comp_ratio_from_pcl
 
 from utils.object_reconstruction_utils import mask_border_contact, estimate_object_center, object_center_error, object_size_ratio, reached
+
 
 # FORMAT = "%(pathname)s:%(lineno)d %(message)s"
 OBJ_SCALE_FACTOR = 0.5
@@ -85,6 +86,20 @@ habitat_transform = np.array([
                         [0., -1., 0., 0.],
                         [0., 0., -1., 0.],
                         [0., 0., 0., 1.]
+                    ])
+
+rotation_90_x = np.array([
+                        [1., 0.,  0., 0.],
+                        [0., 0., -1., 0.],
+                        [0., 1.,  0., 0.],
+                        [0., 0.,  0., 1.]
+                    ])
+
+rotation_m90_x = np.array([
+                        [1., 0.,  0., 0.],
+                        [0., 0., 1., 0],
+                        [0., -1.,  0., 0],
+                        [0., 0.,  0., 1.]
                     ])
 
 
@@ -182,7 +197,7 @@ class NoFrontierError(Exception):
 class NavTester(object):
     """ Implements testing for prediction models
     """
-    def __init__(self, options, scene_id, object_scene, dynamic_scene, dynamic_scene_rec, dino_extraction, save_data, save_map, gaussian_optimization):
+    def __init__(self, options, scene_id, object_scene, dynamic_scene, dynamic_scene_rec, dino_extraction, save_data, save_map, known_env=None):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.options = options
 
@@ -295,6 +310,18 @@ class NavTester(object):
         # Initialize a 3D global pointcloud that we want to fill
         self.global_pcd = o3d.geometry.PointCloud()
         self.global_obj_pcd = o3d.geometry.PointCloud()
+
+        if known_env is not None:
+            self.known_env_path = known_env
+            print("Known env path: ", self.known_env_path)
+            self.pcd_known_env = load_env_glb_pointcloud(self.known_env_path, apply_transform=habitat_transform)
+            self.gt_3d_oriented_w = apply_transform_to_pointcloud(self.pcd_known_env, rotation_90_x)
+            self.tau_m = 0.2
+        else:
+            self.known_env_path = None
+            self.pcd_known_env = None
+            self.gt_3d_oriented_w = None
+
 
         # Dynamic Object initialization
         if self.object_scene:
@@ -527,27 +554,6 @@ class NavTester(object):
             pathfinder = self.habitat_ds.sim._sim.pathfinder
             object_position = None
 
-            # Check if the initial position is navigable
-            # if pathfinder.is_navigable(initial_obj_pos):
-            #     object_position = initial_obj_pos
-            #     print("Using initial camera-forward position for the dynamic object.")
-            # else:
-            #     # Otherwise, sample a random navigable position
-            #     print("Initial position not navigable. Sampling random position.")
-            #     found = False
-            #     max_tries = 100
-            #     for _ in range(max_tries):
-            #         sample_pos = pathfinder.get_random_navigable_point()
-            #         if sample_pos is not None:
-            #             object_position = sample_pos
-            #             # Increase y coordinate to place the object above the ground
-            #             # object_position[1] += 0.5  # Adjust height as needed
-            #             print("Object position sampled:", object_position)
-            #             found = True
-            #             break
-
-            #     if not found:
-            #         raise RuntimeError("Couldn't find a random navigable point for the object.")
             object_position = initial_obj_pos
             # Snap the object position to the nearest navigable point
             ground_pos = mn.Vector3(*pathfinder.snap_point(object_position))
@@ -567,10 +573,10 @@ class NavTester(object):
         img = observations['rgb'][:, :, :3]
         depth = observations['depth'].reshape(1, self.habitat_ds.img_size[0], self.habitat_ds.img_size[1])
 
-        # Get Camera to World transform
         c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
         c2w_t = torch.from_numpy(c2w).float().cuda()
         w2c_t = torch.linalg.inv(c2w_t)
+
         # resume SLAM system if neededs
         slam = GaussianSLAM(self.slam_config)
         slam.init(img, depth, c2w_t)
@@ -614,12 +620,12 @@ class NavTester(object):
             os.makedirs(os.path.join(self.policy_eval_dir, "camera_poses"), exist_ok=True)
 
          # === Load DINOv2 ===   
-        if self.dino_extraction:
-            from scripts.dino_extract import DINOExtract, extract_dino_features, dino_image_visualization
+        # if self.dino_extraction:
+        #     from scripts.dino_extract import DINOExtract, extract_dino_features, dino_image_visualization
 
-            dino_export="../third_party/dino_models/dinov2_vitl14_pretrain.pth"
-            dino_extractor = DINOExtract(dino_export, feature_layer=1)
-            print("DINOv2 model loaded")
+        #     dino_export="../third_party/dino_models/dinov2_vitl14_pretrain.pth"
+        #     dino_extractor = DINOExtract(dino_export, feature_layer=1)
+        #     print("DINOv2 model loaded")
         
         print("Max steps: ", self.options.max_steps)
         try: 
@@ -652,11 +658,6 @@ class NavTester(object):
                 # c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
                 # c2w_t = torch.from_numpy(c2w).float().cuda()
                 # w2c_t = torch.linalg.inv(c2w_t)
-                camera_pose = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
-                
-                # Store all the camera poses
-                saved_camera_poses.append(camera_pose.copy())
-                
                 observations_cpu = self.habitat_ds.sim.sim.get_sensor_observations()
                 rgb_bgr = cv2.cvtColor(observations_cpu["rgb"], cv2.COLOR_RGB2BGR)
                 depth_vis_gray = (observations_cpu["depth"] / 10.0 * 255).astype(np.uint8)
@@ -666,22 +667,35 @@ class NavTester(object):
                 semantic_obs_uint8 = (observations_cpu["semantic"] % 40).astype(np.uint8)
                 semantic_vis = d3_40_colors_rgb[semantic_obs_uint8]
 
+                camera_pose = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
+                if self.pcd_known_env is not None:
+                    c2w_t = torch.from_numpy(camera_pose).float().cuda()
+                    inv_K_t = self.habitat_ds.inv_K.cuda().float()
+                    H, W = self.habitat_ds.img_size
+                    
+                    mask = novelty_mask_from_pcd_nn(self.gt_3d_oriented_w, depth_raw, inv_K_t, c2w_t, (H, W), z_forward="Z", dist_thresh_m=0.05, stride=1, frame_id=t)
+
+                # Store all the camera poses
+                saved_camera_poses.append(camera_pose.copy())
+
                 # Detect object in the scene
                 if self.dynamic_scene_rec:
                     image_shape = rgb_bgr.shape[:2]
-                    mask = self.project_points_to_image(self.obj_pcd, intrinsics, c2w, object_pose, image_shape)
+                    # mask = self.project_points_to_image(self.obj_pcd, intrinsics, c2w, object_pose, image_shape)
                     # print(f"Mask {t} found object points: {np.sum(mask > 0)}")
                     object_mask = (observations_cpu["semantic"] == self.sim_obj.get_semantic_id()).astype(np.uint8) * 255
-                    object_mask_bw = cv2.cvtColor(object_mask, cv2.COLOR_GRAY2BGR)
+                    
+                    if self.pcd_known_env is None:
+                        object_mask_bw = cv2.cvtColor(object_mask, cv2.COLOR_GRAY2BGR)
+                    else:
+                        object_mask_bw = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
                     if np.array(object_mask_bw).ndim == 3:
                         object_mask_bw = object_mask_bw[:, :, 0]
                     
                     # Save the object mask if and only if it is not empty
                     if np.any(object_mask_bw!=0):
-                        # cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_rend_{t}.png"), mask)
-
                         cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_{t}.png"), object_mask_bw)
-                        # cv2.imwrite(os.path.join(self.policy_eval_dir, f"bw_mask/bw_est_{t}.png"), dynamic_mask_img)
                         mask_bool = object_mask_bw != 0
                         masked_rgb = np.zeros_like(rgb_bgr)
                         masked_rgb[mask_bool] = rgb_bgr[mask_bool]
@@ -726,6 +740,7 @@ class NavTester(object):
                 c2w = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
                 c2w_t = torch.from_numpy(c2w).float().cuda()
                 w2c_t = torch.linalg.inv(c2w_t)
+                
                 
                 # print("Camera pose: ", camera_pose)
                 # print("C2W new: ", c2w)
@@ -1148,19 +1163,7 @@ class NavTester(object):
 
     def evaluate_3d_reconstruction(self):
         
-        rotation_90_x = np.array([
-            [1., 0.,  0., 0.],
-            [0., 0., -1., 0.],
-            [0., 1.,  0., 0.],
-            [0., 0.,  0., 1.]
-        ])
-
-        rotation_m90_x = np.array([
-            [1., 0.,  0., 0.],
-            [0., 0., 1., 0],
-            [0., -1.,  0., 0],
-            [0., 0.,  0., 1.]
-        ])
+        
 
         gt_3d_reconstruction = load_glb_pointcloud(os.path.join(self.options.root_path, self.options.dataset, self.options.scenes_list[0], self.options.scenes_list[0] + ".glb"))
         # est_3d_reconstruction = load_ply_pointcloud(os.path.join(self.policy_eval_dir, "pointcloud", "global_pcl_{}.ply".format(self.options.max_steps)))
