@@ -982,7 +982,7 @@ class AstarPlanner:
     
     def global_object_planning(self, pose_evaluation_fn:Callable = None, gaussian_points = None, gaussian_points_scene=None, 
                         goal_proposal_fn:Callable = None, expansion=1, visualize=True, 
-                        agent_pose=None):
+                        agent_pose=None, criterion=None):
         """ 
         Global Planning for next target goal 
         
@@ -1026,7 +1026,7 @@ class AstarPlanner:
 
             # sample poses
             while len(candidate_pose) == 0:
-                candidate_pose = self.generate_candidate_object(candidate_obj_pos, expansion)
+                candidate_pose = self.generate_candidate_adv_object(candidate_obj_pos, expansion, mode="sorted")
                 # expand the radius
                 expansion *= 1.5 
             
@@ -1065,7 +1065,7 @@ class AstarPlanner:
         if pose_evaluation_fn is None:
             scores, poses = self.pose_eval(candidate_pose)
         else:
-            scores, poses = pose_evaluation_fn(candidate_pose, random_gaussian_params)
+            scores, poses = pose_evaluation_fn(candidate_pose, random_gaussian_params, criterion=criterion)
         
         #visualize
         if visualize:
@@ -1090,13 +1090,6 @@ class AstarPlanner:
                 vis_map[:,:,1][frontier!=0] = 255
                 vis_map[:,:,2][frontier!=0] = 0
 
-            # candidate poses
-            normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
-            for score, pose in zip(normalized_scores, poses):
-                heatcolor = heatmap(score.item())[:3]
-                pt = self.convert_to_map([pose[0,3],pose[2,3]])
-                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
-                # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
             
             if isinstance(scores, torch.Tensor):
                 best_idx = int(torch.argmax(scores).item())
@@ -1109,7 +1102,7 @@ class AstarPlanner:
             best_pt = self.convert_to_map([best_pose[0, 3].item(), best_pose[2, 3].item()])
 
             # cv2.circle(vis_map, (best_pt[0], best_pt[1]), 3, (0, 255, 255), -1)  # fill
-            cv2.circle(vis_map, (best_pt[0], best_pt[1]), 4, (255, 255, 255), 2) 
+            # cv2.circle(vis_map, (best_pt[0], best_pt[1]), 4, (255, 255, 255), 2) 
             
             R = best_pose[:3, :3]
             # yaw coerente con il tuo codice (atan2(pose[0,2], pose[2,2]))
@@ -1132,22 +1125,30 @@ class AstarPlanner:
 
             cv2.arrowedLine(vis_map, start, (end[0], end[1]), (0, 255, 255), 2, tipLength=0.35) 
             
+            # candidate poses
+            normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
+            for score, pose in zip(normalized_scores, poses):
+                heatcolor = heatmap(score.item())[:3]
+                pt = self.convert_to_map([pose[0,3],pose[2,3]])
+                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+                # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
+            
 
-            cand = candidate_obj_pos
-            if isinstance(cand, torch.Tensor):
-                cand = cand.detach().cpu().numpy()
-            # prendi il primo punto se è (K,2/3)
-            if cand.ndim == 2:
-                cand = cand[0]
-            # usa [x,z]
-            if cand.shape[0] >= 3:
-                cx, cz = float(cand[0]), float(cand[2])
-            else:
-                cx, cz = float(cand[0]), float(cand[1])
+            # cand = candidate_obj_pos
+            # if isinstance(cand, torch.Tensor):
+            #     cand = cand.detach().cpu().numpy()
+            # # prendi il primo punto se è (K,2/3)
+            # if cand.ndim == 2:
+            #     cand = cand[0]
+            # # usa [x,z]
+            # if cand.shape[0] >= 3:
+            #     cx, cz = float(cand[0]), float(cand[2])
+            # else:
+            #     cx, cz = float(cand[0]), float(cand[1])
 
-            cpt = self.convert_to_map([cx, cz])
-            # marker magenta (cerchio pieno + bordo + croce)
-            vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 4, (0, 255, 255), 2)
+            # cpt = self.convert_to_map([cx, cz])
+            # # marker magenta (cerchio pieno + bordo + croce)
+            # vis_map = cv2.circle(vis_map, (cpt[0], cpt[1]), 4, (0, 255, 255), 2)
 
 
             # agent position
@@ -1292,6 +1293,125 @@ class AstarPlanner:
         c2ws[:, :3, 3] = cam_pos
         c2ws[:, :3, :3] = cam_R
         c2ws[:, 3, 3] = 1.
+
+        return c2ws
+    
+    def generate_candidate_adv_object(self,
+                              center_point: torch.Tensor,
+                              expansion: float = 1,
+                              mode: str = "random",             # "random" (default) | "sorted"
+                              theta_step_deg: float = 15.0,      # passo angolare per "sorted"
+                              radial_bins: int = 5,              # # anelli per "sorted"
+                              radial_spacing: str = "linear"     # "linear" | "sqrt_area"
+                              ):
+        """ 
+        Sample camera poses around the (one or more) center points.
+        - mode="random": comportamento originale (campionamento casuale su anello).
+        - mode="sorted": griglia ordinata (angoli equispaziati + raggi discreti).
+        
+        Args:
+            center_point: (Kc, 3) tensor — punti attorno a cui campionare (x,z usati; y forzato a cam_height)
+            expansion: fattore che scala il raggio massimo
+            theta_step_deg: ampiezza passo angolare per la modalità "sorted"
+            radial_bins: numero di anelli radiali in "sorted"
+            radial_spacing: "linear" (r lineare) o "sqrt_area" (uniforme in area dell’anello)
+        """
+        device = center_point.device
+        K, radius = self.K_object, self.radius_object * expansion
+
+        # ---- prepara i center_point a quota fissa (come nel tuo codice) ----
+        center_point_height = torch.ones((center_point.shape[0],), device=device) * self.cam_height
+        # reinterpreta (x, z) dal center_point[:,0], center_point[:,1] -> [x, cam_height, z]
+        center_point = torch.stack([center_point[:, 0], center_point_height, center_point[:, 1]], dim=1)
+
+        # campiona K centri con replacement (comportamento invariato)
+        center_point_rand_index = torch.randint(0, center_point.shape[0], (K,), device=device)
+        center_point = center_point[center_point_rand_index]  # (K, 3)
+
+        # ---- campionamento posizioni camera ----
+        if mode.lower() == "random":
+            # === COMPORTAMENTO ORIGINALE ===
+            theta = torch.rand((K,), device=device) * 2 * torch.pi
+            random_radius = self.min_range_object + torch.rand((K,), device=device) * (radius - self.min_range_object)
+
+            cam_pos = torch.zeros((K, 3), device=device)
+            cam_pos[:, 0] = center_point[:, 0] + random_radius * torch.sin(theta)
+            cam_pos[:, 1] = self.cam_height
+            cam_pos[:, 2] = center_point[:, 2] + random_radius * torch.cos(theta)
+
+        elif mode.lower() == "sorted":
+            # === GRIGLIA ORDINATA: anelli radiali + angoli equispaziati ===
+            # 1) angoli
+            step_rad = torch.deg2rad(torch.tensor(theta_step_deg, device=device))
+            # almeno 1 campione
+            num_theta = max(1, int(torch.round(2 * torch.pi / step_rad).item()))
+            thetas = torch.linspace(0.0, 2 * torch.pi, steps=num_theta, device=device, dtype=torch.float32)
+            # l'ultimo coincide col primo; meglio escludere l’estremo per evitare duplicati
+            thetas = thetas[:-1] if thetas.numel() > 1 else thetas
+
+            # 2) raggi (radial_bins anelli da min_range a radius)
+            radial_bins = max(1, int(radial_bins))
+            if radial_spacing == "sqrt_area" and radial_bins > 1:
+                # uniforme in area dell’anello: r^2 lineare
+                u = torch.linspace(0.0, 1.0, steps=radial_bins, device=device)
+                r_min2 = self.min_range_object ** 2
+                r_max2 = radius ** 2
+                r_vals = torch.sqrt(r_min2 + u * (r_max2 - r_min2))
+            else:
+                # lineare semplice
+                r_vals = torch.linspace(self.min_range_object, radius, steps=radial_bins, device=device)
+
+            # 3) mesh (r, theta) → lista di candidate
+            R, T = torch.meshgrid(r_vals, thetas, indexing='ij')  # (radial_bins, num_theta)
+            R = R.reshape(-1)  # (radial_bins*num_theta,)
+            T = T.reshape(-1)
+
+            # 4) costruiamo posizioni; dobbiamo produrre esattamente K pose
+            #    se la griglia ha più/meno elementi di K, facciamo slice o repeat
+            total = R.numel()
+            if total < K:
+                rep = (K + total - 1) // total
+                R = R.repeat(rep)[:K]
+                T = T.repeat(rep)[:K]
+            elif total > K:
+                R = R[:K]
+                T = T[:K]
+
+            # usa i center_point "accoppiati" (già di dimensione K) come nel random
+            cam_pos = torch.zeros((K, 3), device=device)
+            cam_pos[:, 0] = center_point[:, 0] + R * torch.sin(T)
+            cam_pos[:, 1] = self.cam_height
+            cam_pos[:, 2] = center_point[:, 2] + R * torch.cos(T)
+
+            # riusa T come yaw di base (che punta radialmente verso l’esterno); poi lo ruotiamo di π per guardare il centro
+            theta = T
+        else:
+            raise ValueError("mode must be 'random' or 'sorted'")
+
+        # ---- orientamento (look-at verso il centro) identico al tuo ----
+        # se in random avevamo theta random, in sorted abbiamo T; in ogni caso aggiungiamo π
+        # per orientare lo sguardo verso il centro
+        if mode.lower() == "random":
+            # theta definito nella branch random
+            yaw = theta + torch.pi
+        else:
+            # theta = T nella branch sorted
+            yaw = theta + torch.pi
+
+        cam_rot = torch.zeros((K, 4), device=device)
+        cam_rot[:, 0] = torch.cos(yaw / 2)  # w
+        cam_rot[:, 2] = torch.sin(yaw / 2)  # y  (assumendo convenzione [w, x, y, z] con yaw su asse Y)
+        cam_R = build_rotation(cam_rot)
+
+        # flip X e Y come nel tuo codice (convenzione camera)
+        cam_R[:, :, 0] *= -1
+        cam_R[:, :, 1] *= -1
+
+        # ---- composizione c2w ----
+        c2ws = torch.zeros((K, 4, 4), device=device)
+        c2ws[:, :3, 3] = cam_pos
+        c2ws[:, :3, :3] = cam_R
+        c2ws[:, 3, 3] = 1.0
 
         return c2ws
 

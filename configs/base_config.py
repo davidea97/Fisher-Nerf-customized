@@ -21,6 +21,8 @@ cfg.num_uniform_H_train = -1
 cfg.opacity_pixel_weight = 0.00001
 cfg.vol_weighted_H = False
 
+cfg.criterion = "fisher" # "fisher", "topt", "dopt"
+
 cfg.policy = CN()
 cfg.policy.name = "oracle"
 cfg.policy.with_rrt_planning = False

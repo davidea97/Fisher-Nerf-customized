@@ -762,7 +762,7 @@ class GaussianObjectSLAM:
                 selected_time_idx.append(time_idx)
                 selected_keyframes.append(-1)
                 # Print the selected keyframes
-                print(f"\nSelected Keyframes at Frame {time_idx-1+self.cur_frame}: {[x - 1 + self.cur_frame for x in selected_time_idx]}")
+                # print(f"\nSelected Keyframes at Frame {time_idx-1+self.cur_frame}: {[x - 1 + self.cur_frame for x in selected_time_idx]}")
                 # print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
             # self.cur_frame += 1 # DAVIDE UPDATE
@@ -1402,12 +1402,46 @@ class GaussianObjectSLAM:
             H_train += cur_H
 
         return H_train 
+
+    def compute_H_train_popgs(self, K:int=4):
+        """
+        Somma la diag(J^T J) sui keyframe (stesso ruolo del tuo compute_H_train).
+        """
+        H_train_diag = None
+        for keyframe in self.keyframe_list:
+            w2c = keyframe['est_w2c']
+            cur_diag, vis_count = self.estimate_diag_JtJ_simple(w2c, K=K)
+            H_train_diag = cur_diag if (H_train_diag is None) else (H_train_diag + cur_diag)
+        if H_train_diag is None:
+            # fallback (es. nessun keyframe): vettore zero con shape coerente
+            # ricaviamo una shape chiamando una volta su una posa a caso
+            if len(self.keyframe_list) > 0:
+                H_train_diag, vis_count = self.estimate_diag_JtJ_simple(self.keyframe_list[0]['est_w2c'], K=1)
+                H_train_diag.zero_()
+            else:
+                raise RuntimeError("No keyframes available for POP-GS prior.")
+        return H_train_diag
+    
+    def compute_H_train_blocks(self, K: int = 2, **kw):
+        Hm, vis_ref = None, None
+        for kf in self.keyframe_list:
+            Hb, vis_idx = self.estimate_block_JtJ(kf['est_w2c'], K=K, **kw)
+            if Hm is None:
+                Hm, vis_ref = Hb, vis_idx
+            else:
+                # allinea banalmente: tronca al numero minimo di visibili
+                Nv = min(Hm.shape[0], Hb.shape[0])
+                Hm = Hm[:Nv] + Hb[:Nv]
+                vis_ref = vis_ref[:Nv]
+        if Hm is None:
+            raise RuntimeError("No keyframes available for POP-GS prior (blocks).")
+        return Hm, vis_ref
     
     def gs_pts_cnt(self, random_gaussian_params=None):
         """ API Setting """
         return 1
        
-    def pose_eval(self, poses, random_gaussian_params=None):
+    def pose_eval(self, poses, random_gaussian_params=None, criterion=None):
         """ Compute pose scores for the poses """
         H_train = self.compute_H_train()    # Information gain matrix for keyframes until now
         H_train_inv = torch.reciprocal(H_train + 0.1)
@@ -1431,7 +1465,104 @@ class GaussianObjectSLAM:
         navigable_c2w = torch.stack(navigable_c2ws)
         
         return scores, navigable_c2w
+    
+    def pose_eval_popgs(self, poses, random_gaussian_params=None, criterion:str="topt", K:int=4, lam:float=1e-6):
+        """
+        POp-GS (simple-diag) pose evaluation:
+        - costruisce H_train come somma diag(J^T J) sui keyframe
+        - per ogni posa candidata calcola diag(J^T J) e applica T-opt (default) o D-opt
+        Ritorna: scores (tensor), navigable_c2w (stack)
+        """
+        # 1) Prior informativo
+        H_train_diag = self.compute_H_train_popgs(K=K)   # diag(J^T J) aggregata sui keyframe
+
+        scores = []
+        navigable_c2ws = []
+
+        for cam_id, c2w in enumerate(tqdm(poses, desc=f"POp-GS [{criterion}]")):
+            w2c = torch.linalg.inv(c2w)
+
+            # 2) diag(J^T J) alla posa
+           
+            cur_diag, vis_count = self.estimate_diag_JtJ_simple(w2c, K=K)
+
+            # (opzionale: mantieni la tua chiamata di render per coerenza con la toolchain)
+            self.render_at_pose(c2w, random_gaussian_params)
+
+            # 3) P-Optimality score
+            if criterion.lower() == "topt":
+                view_score = self.topt_score_from_diags(H_train_diag, cur_diag, lam=lam)
+            elif criterion.lower() == "dopt":
+                view_score = self.dopt_score_from_diags(H_train_diag, cur_diag, lam=lam)
+            else:
+                raise ValueError("criterion must be 'topt' or 'dopt'")
+
+            scores.append(view_score)
+            navigable_c2ws.append(c2w)
+
+        # scores = torch.tensor(scores, device=poses[0].device if isinstance(poses, (list,tuple)) else "cuda")
+        # navigable_c2w = torch.stack(navigable_c2ws)
+        scores = torch.tensor(scores)
+        navigable_c2w = torch.stack(navigable_c2ws)
+
+        return scores, navigable_c2w
+
+    def pose_eval_popgs_blocks(self, poses, random_gaussian_params=None, criterion:str="topt", K:int=6, lam:float=1e-6,
+                           use_rot=True, use_scale=True, use_opacity=True):
+        Hm_blocks, _ = self.compute_H_train_blocks(K=K, use_rot=use_rot, use_scale=use_scale, use_opacity=use_opacity)
+        scores = []
+        navigable_c2ws = []
+        for c2w in tqdm(poses, desc=f"POp-GS blocks [{criterion}]"):
+            w2c = torch.linalg.inv(c2w)
+            Jb, _ = self.estimate_block_JtJ(w2c, K=K, use_rot=use_rot, use_scale=use_scale, use_opacity=use_opacity)
+            self.render_at_pose(c2w, random_gaussian_params)
+            Nv = min(Hm_blocks.shape[0], Jb.shape[0])
+            Hb = Hm_blocks[:Nv]
+            J  = Jb[:Nv]
+            if criterion.lower()=="topt":
+                score = self.t_opt_blocks(Hb, J, lam)  
+            elif criterion.lower() == "dopt":
+                score = self.d_opt_blocks(Hb, J, lam)
+            else:
+                raise ValueError("criterion must be 'topt' or 'dopt'")
         
+            scores.append(score.item())
+            navigable_c2ws.append(c2w)
+        
+        scores = torch.tensor(scores)
+        navigable_c2w = torch.stack(navigable_c2ws)
+
+        return scores, navigable_c2w
+    
+    def topt_score_from_diags(self, H_train_diag: torch.Tensor, JtJ_diag_pi: torch.Tensor, lam: float = 1e-6) -> torch.Tensor:
+        """
+        T-opt (da massimizzare): - sum_j 1 / (H_train_j + JtJ_j + λ)
+        """
+        Hpi = H_train_diag + JtJ_diag_pi + lam
+        return - torch.sum(1.0 / torch.clamp(Hpi, min=1e-12))
+
+    def dopt_score_from_diags(self, H_train_diag: torch.Tensor, JtJ_diag_pi: torch.Tensor, lam: float = 1e-6) -> torch.Tensor:
+        """
+        D-opt (da massimizzare): sum_j log(H_train_j + JtJ_j + λ) - sum_j log(H_train_j + λ)
+        """
+        Hm  = H_train_diag + lam
+        Hpi = Hm + JtJ_diag_pi
+        return torch.sum(torch.log(torch.clamp(Hpi, min=1e-12))) - torch.sum(torch.log(torch.clamp(Hm,  min=1e-12)))
+
+    def t_opt_blocks(self, Hm_blocks, J_blocks, lam=1e-6):
+        I = torch.eye(Hm_blocks.shape[-1], device=Hm_blocks.device, dtype=Hm_blocks.dtype)
+        Hpi = Hm_blocks + J_blocks + lam * I
+        invH = torch.linalg.inv(Hpi)
+        return - torch.einsum('bii->', invH)  # somma delle trace inv per blocco
+
+    def d_opt_blocks(self, Hm_blocks, J_blocks, lam=1e-6):
+        I = torch.eye(Hm_blocks.shape[-1], device=Hm_blocks.device, dtype=Hm_blocks.dtype)
+        Hm  = Hm_blocks + lam * I
+        Hpi = Hm + J_blocks
+        _, log1 = torch.linalg.slogdet(Hpi)
+        _, log0 = torch.linalg.slogdet(Hm)
+        return (log1 - log0).sum()
+
     def delete_gaussians_by_index(self, gaussian_index):
         num_gaussians = self.params["means3D"].shape[0]
         keep_index = torch.ones((num_gaussians, ), dtype=torch.bool).cuda()
@@ -1610,13 +1741,21 @@ class GaussianObjectSLAM:
         visible = (radius > 0)
         vis_count = int(visible.sum().item())
         # print(f"Visible Points: {vis_count} / {num_points}")
+        parts = [
+            transformed_pts.grad.detach().reshape(num_points, -1),  # means3D
+            opacities.grad.detach().reshape(num_points, -1)        # α
+        ]
+        parts.append(scales.grad.detach().reshape(num_points, -1))     # se vuoi le scale
+        parts.append(rotations.grad.detach().reshape(num_points, -1))  # se vuoi le rotazioni
         if return_points:
-            cur_H = torch.cat([transformed_pts.grad.detach().reshape(num_points, -1),  
-                                opacities.grad.detach().reshape(num_points, -1)], dim=1)
+            # cur_H = torch.cat([transformed_pts.grad.detach().reshape(num_points, -1),  
+            #                     opacities.grad.detach().reshape(num_points, -1)], dim=1)
+            cur_H = torch.cat(parts, dim=1)
 
         else:
-            cur_H = torch.cat([transformed_pts.grad.detach().reshape(-1), 
-                                opacities.grad.detach().reshape(-1)])
+            # cur_H = torch.cat([transformed_pts.grad.detach().reshape(-1), 
+            #                     opacities.grad.detach().reshape(-1)])
+            cur_H = torch.cat(parts)
             
             
         # set grad to zero
@@ -1628,6 +1767,135 @@ class GaussianObjectSLAM:
         else:
             return cur_H, torch.eye(6).cuda(), vis_count
     
+    @torch.enable_grad()
+    def estimate_diag_JtJ_simple(self, 
+                                  w2c: torch.Tensor, 
+                                  K:int=4) -> torch.Tensor:
+        """
+        Stima diag(J^T J) alla posa w2c via Hutchinson:
+        diag ≈ (1/K) Σ_k (J^T z_k) ⊙ (J^T z_k)
+        Conserva lo stesso 'ordine' (means3D -> opacities) del tuo compute_Hessian.
+        """
+        if isinstance(w2c, torch.Tensor):
+            w2c = w2c.float().to("cuda")
+        else:
+            w2c = torch.tensor(w2c, dtype=torch.float32, device="cuda")
+
+        with torch.no_grad():
+            pts = self.params['means3D']                      # (N,3)
+            pts4 = torch.cat([pts, torch.ones(pts.shape[0],1, device="cuda", dtype=torch.float32)], dim=1)
+            transformed_pts = (w2c @ pts4.T).T[:, :3]         # -> camera frame
+            rgb_colors = self.params['rgb_colors']                    # già nel tuo code
+            rotations  = F.normalize(self.params['unnorm_rotations'])
+            opacities  = torch.sigmoid(self.params['logit_opacities'])
+            scales     = torch.exp(self.params['log_scales'])
+            if scales.shape[-1] == 1:  # isotropico -> 3
+                scales = torch.tile(scales, (1, 3))
+
+        # per rimanere "pari passo" al tuo Fisher attuale usiamo means3D + opacities (puoi aggiungere altro se vuoi)
+        rendervar = {
+            'means3D': transformed_pts.requires_grad_(True),
+            'opacities': opacities.requires_grad_(True),
+            'rotations': rotations.requires_grad_(True),
+            'scales': scales.requires_grad_(True), 
+            'colors_precomp': rgb_colors,
+            'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda")
+        }
+        
+        rendervar['means2D'].retain_grad()
+        im, radius, _ = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
+        visible = (radius > 0)
+        vis_count = int(visible.sum().item())
+        diag_accum = None
+
+        for k in range(K):
+            z = torch.randn_like(im)                                   # o torch.sign(torch.randn_like(im))
+            for par, v in rendervar.items():
+                if isinstance(v, torch.Tensor) and v.requires_grad and (v.grad is not None):
+                    v.grad.zero_()
+
+            im.backward(gradient=z, retain_graph=(k < K-1))
+            g_means = rendervar['means3D'].grad.detach().reshape(-1)          # (N*3,)
+            g_opac  = rendervar['opacities'].grad.detach().reshape(-1)        # (N*1,)
+            g_rot   = rendervar['rotations'].grad.detach().reshape(-1)        # (N*R,)  R=3 o 4 a seconda di come le tieni
+            g_scale = rendervar['scales'].grad.detach().reshape(-1)           # (N*3,)  (già tilato a 3)
+
+            g = torch.cat([g_means, g_opac, g_rot, g_scale], dim=0)                          # J^T z
+            contrib = g * g                                             # (J^T z)^2
+            diag_accum = contrib if (diag_accum is None) else (diag_accum + contrib)
+
+        for par,v in rendervar.items():
+            if isinstance(v, torch.Tensor) and v.requires_grad and (v.grad is not None):
+                v.grad.zero_()
+        return diag_accum / float(K), vis_count
+    
+    @torch.enable_grad()
+    def estimate_block_JtJ(self, w2c, K: int = 2,
+                       use_rot: bool = True, use_scale: bool = True, use_opacity: bool = True):
+        """
+        Ritorna:
+        H_blocks: (Nv, d, d)  blocchi J^T J per ogni splat visibile
+        vis_idx:  (Nv,)       indici degli splat visibili
+        """
+        if not isinstance(w2c, torch.Tensor):
+            w2c = torch.tensor(w2c, dtype=torch.float32, device="cuda")
+        else:
+            w2c = w2c.float().to("cuda")
+
+        with torch.no_grad():
+            pts = self.params['means3D']
+            pts4 = torch.cat([pts, torch.ones(pts.shape[0],1, device="cuda")], dim=1)
+            transformed_pts = (w2c @ pts4.T).T[:, :3]
+            rotations  = F.normalize(self.params['unnorm_rotations'])
+            opacities  = torch.sigmoid(self.params['logit_opacities'])
+            scales     = torch.exp(self.params['log_scales'])
+            if scales.shape[-1] == 1: scales = scales.repeat(1,3)
+            colors     = self.params['rgb_colors']  # di solito senza grad per robustezza
+
+        rvars = {
+            'means3D': transformed_pts.requires_grad_(True),
+            'rotations': rotations.requires_grad_(use_rot),
+            'scales':    scales.requires_grad_(use_scale),
+            'opacities': opacities.requires_grad_(use_opacity),
+            'colors_precomp': colors,  # tieni off grad per ora
+            'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda"),
+        }
+        rvars['means2D'].retain_grad()
+        im, radius, _ = Renderer(raster_settings=self.cam, backward_power=2)(**rvars)
+        vis_idx = torch.where(radius > 0)[0]
+        Nv = vis_idx.numel()
+
+        # backward fittizia per scoprire d (dimensione blocco)
+        im.sum().backward(retain_graph=True)
+        cols = [rvars['means3D'].grad]
+        if use_opacity: cols.append(rvars['opacities'].grad)
+        if use_rot:     cols.append(rvars['rotations'].grad)
+        if use_scale:   cols.append(rvars['scales'].grad)
+        G0 = torch.cat([c.reshape(c.shape[0], -1) for c in cols], dim=1)  # (N, d)
+        d  = G0.shape[1]
+        for v in rvars.values():
+            if isinstance(v, torch.Tensor) and v.grad is not None: v.grad.zero_()
+
+        H_blocks = torch.zeros((Nv, d, d), device=im.device, dtype=im.dtype)
+
+        for k in range(int(K)):
+            z = torch.randn_like(im)
+            for v in rvars.values():
+                if isinstance(v, torch.Tensor) and v.grad is not None: v.grad.zero_()
+            im.backward(gradient=z, retain_graph=(k < K-1))
+
+            cols = [rvars['means3D'].grad]
+            if use_opacity: cols.append(rvars['opacities'].grad)
+            if use_rot:     cols.append(rvars['rotations'].grad)
+            if use_scale:   cols.append(rvars['scales'].grad)
+            G = torch.cat([c.reshape(c.shape[0], -1) for c in cols], dim=1)  # (N, d)
+            Gv = G[vis_idx, :]                                              # (Nv, d)
+            H_blocks += Gv.unsqueeze(2) * Gv.unsqueeze(1)                   # (Nv, d, d)
+
+        for v in rvars.values():
+            if isinstance(v, torch.Tensor) and v.grad is not None: v.grad.zero_()
+        return H_blocks / float(K), vis_idx
+
     def get_latest_frame(self):
         """
         

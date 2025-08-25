@@ -765,11 +765,12 @@ class NavTester(object):
                 threshold = 0
                 object_detected = np.sum(object_mask_bw)
                 if object_detected > threshold:
-                    print(">> Start object tracking and reconstruction")
+                    
                     self.object_tracking = True # True
                     if not self.init_object_slam_done:   
                         self.init_object_slam = True
                         self.init_object_slam_done = True
+                        print(">> Start object tracking and reconstruction")
                         # self.action_queue = queue.Queue(maxsize=100)   # TODO: initialize action queue and put the object in the center of the image
                     else:
                         self.init_object_slam = False
@@ -1031,7 +1032,7 @@ class NavTester(object):
                             print(">> Planning the best path for object reconstruction")
                             # print("Guassian points: ", obj_slam.gaussian_points)
                             best_path, best_map_path, best_goal, best_world_path, \
-                                    best_global_path, global_points, EIGs = self.plan_best_object_path(obj_slam, slam, current_agent_pose, expansion, t, goal_pose)
+                                    best_global_path, global_points, EIGs = self.plan_best_object_path(obj_slam, slam, current_agent_pose, expansion, t, goal_pose, criteria=self.slam_config["criterion"])
                             
                             if best_path is None:
                                 logger.warn(f"time_step {t}, no valid path found, re-plan")
@@ -1609,7 +1610,7 @@ class NavTester(object):
 
     def plan_best_object_path(self, obj_slam: GaussianObjectSLAM, slam: GaussianSLAM, 
                        current_agent_pose: np.array, 
-                       expansion:int,  t: int, last_goal = None):
+                       expansion:int,  t: int, last_goal = None, criteria=None):
         """ Path & Action planning 
         
         Args:
@@ -1635,10 +1636,19 @@ class NavTester(object):
         # global plan -- select global 
         pose_proposal_fn = None if not hasattr(obj_slam, "pose_proposal") else getattr(obj_slam, "pose_proposal")
         print("Start global planning for object")
-        global_points, EIGs, random_gaussian_params = \
-            self.policy.global_object_planning(obj_slam.pose_eval, gaussian_points, gaussian_points_scene, pose_proposal_fn, \
-                                        expansion=expansion, visualize=True, \
-                                        agent_pose=current_agent_pos)#, last_goal=last_goal, slam=obj_slam)
+        if criteria.lower() == "fisher":
+            global_points, EIGs, random_gaussian_params = \
+                self.policy.global_object_planning(obj_slam.pose_eval, gaussian_points, gaussian_points_scene, pose_proposal_fn, \
+                                            expansion=expansion, visualize=True, \
+                                            agent_pose=current_agent_pos)
+        else:
+            global_points, EIGs, random_gaussian_params = \
+                self.policy.global_object_planning(obj_slam.pose_eval_popgs_blocks, gaussian_points, gaussian_points_scene, pose_proposal_fn, \
+                                            expansion=expansion, visualize=True, \
+                                            agent_pose=current_agent_pos, criterion=criteria)
+        
+
+        
         print(f"Found {len(global_points)} global points: ")
         # sort global points by EIG 
         EIGs = EIGs.numpy()
@@ -1658,18 +1668,28 @@ class NavTester(object):
                 cur_H = obj_slam.compute_Hessian(cur_uni_w2c, random_gaussian_params=random_gaussian_params, return_points=True, return_pose=False)
                 H_train = H_train + cur_H if H_train is not None else cur_H.detach().clone()
         else:
-            H_train = obj_slam.compute_H_train(random_gaussian_params)
-            # H_train = rearrange(H_train, "np c -> (np c)")
+            if criteria.lower() == "fisher":
+                H_train = obj_slam.compute_H_train(random_gaussian_params)
+            else:
+                H_train = obj_slam.compute_H_train_popgs()
+            # H_train_diag = obj_slam.compute_H_train_popgs()
         
         gs_pts_cnt = obj_slam.gs_pts_cnt(random_gaussian_params)
 
         # plan actions for each global goal
         valid_global_pose, path_actions, paths_arr = self.action_planning_object(global_points, current_agent_pose, slam.gaussian_points, t)
         logger.info(f"Evaluate path actions: {len(path_actions)}")
-        
-        best_path, best_map_path, best_goal, best_world_path, best_global_path = self.path_evaluation(valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train, random_gaussian_params, obj_slam)
 
+        if criteria.lower() == "fisher":
+            best_path, best_map_path, best_goal, best_world_path, best_global_path = self.path_evaluation(valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train, random_gaussian_params, obj_slam)
+        else:
+            best_path, best_map_path, best_goal, best_world_path, best_global_path = self.path_evaluation_popgs(valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train, random_gaussian_params, obj_slam, criterion=criteria)
 
+        self.draw_final_map(best_goal, current_agent_pos, best_global_path, t)
+
+        return best_path, best_map_path, best_goal, best_world_path, best_global_path, global_points, EIGs
+
+    def draw_final_map(self, best_goal, current_agent_pos, best_global_path, t=0):
         occ_map = self.policy.occ_map.argmax(0) == 1
         binarymap = occ_map.cpu().numpy().astype(np.uint8)
         
@@ -1725,7 +1745,6 @@ class NavTester(object):
         pt = self.policy.convert_to_map([current_agent_pos[0], current_agent_pos[2]])
         cv2.circle(vis_map, (pt[0], pt[1]), 4, (255, 0, 0), 2) 
         vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
-        
 
         # Waypoint position
         for waypoint in best_global_path:
@@ -1735,10 +1754,6 @@ class NavTester(object):
         os.makedirs(os.path.join(self.policy.eval_dir, "final_maps"), exist_ok=True)
         plt.imsave(os.path.join(self.policy.eval_dir, "final_maps", "occmap_with_candidates_{}.png".format(t)), vis_map)
         plt.close()
-
-
-
-        return best_path, best_map_path, best_goal, best_world_path, best_global_path, global_points, EIGs
 
     def path_evaluation(self, valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train, random_gaussian_params, obj_slam: GaussianObjectSLAM):
         
@@ -1751,6 +1766,8 @@ class NavTester(object):
         best_map_path = None
         best_world_path = None
         valid_path = 0
+
+        gs_pts_cnt = obj_slam.gs_pts_cnt(random_gaussian_params)
 
         for pose_np, path_action, paths, final_EIG in tqdm(zip(valid_global_pose, path_actions, paths_arr, EIGs), desc="Evaluate Paths"):
             # check cluster manager  
@@ -1808,8 +1825,9 @@ class NavTester(object):
                     map_coord = self.policy.convert_to_map(map_coord)
                     map_path.append(map_coord)
 
-            if self.cfg.path_end_weight > 0:
-                total_path_EIG = total_path_EIG / len(curr_action) + self.cfg.object_path_end_weight * final_EIG
+            if self.cfg.object_path_end_weight > 0:
+                # total_path_EIG = total_path_EIG / len(curr_action) + self.cfg.object_path_end_weight * final_EIG
+                total_path_EIG = total_path_EIG + self.cfg.object_path_end_weight * final_EIG
             else:
                 total_path_EIG = (total_path_EIG + final_EIG) / len(curr_action)
             
@@ -1825,6 +1843,105 @@ class NavTester(object):
                 best_world_path = world_path
 
         return best_path, best_map_path, best_goal, best_world_path, best_global_path
+
+
+    def path_evaluation_popgs(self, valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train_diag, random_gaussian_params, obj_slam: GaussianObjectSLAM, criterion="topt", lam=1e-6):
+
+        total_path_EIGs = []
+
+        best_global_path = None
+        best_path_EIG = -float("inf")
+        best_path = None
+        best_goal = None
+        best_map_path = None
+        best_world_path = None
+        valid_path = 0
+
+        for pose_np, path_action, paths, final_EIG in tqdm(zip(valid_global_pose, path_actions, paths_arr, EIGs), desc="Evaluate Paths"):
+            # check cluster manager  
+            if cm.should_exit():
+                cm.requeue()
+
+            if valid_path > 20:
+                break
+            
+            valid_path += 1
+           
+            # set to cam height
+            future_pose = current_agent_pose.copy()
+            future_pose[1, 3] = self.policy.cam_height
+
+            H_train_path = H_train_diag.clone()
+            total_path_EIG = 0
+            map_path = []
+            world_path = []
+            curr_action = []
+
+            for action in path_action:
+
+                future_pose = compute_next_campos(future_pose, action, self.slam_config["forward_step_size"], self.slam_config["turn_angle"])
+                future_pose_w2c = np.linalg.inv(future_pose)
+                # cur_H, pose_H, vis_count = obj_slam.compute_Hessian(future_pose_w2c, random_gaussian_params=random_gaussian_params, 
+                #                                         return_pose=True, return_points=True)
+                cur_diag, vis_count = obj_slam.estimate_diag_JtJ_simple(future_pose_w2c)
+                # H_train_inv_path = torch.reciprocal(H_train_path + self.cfg.H_reg_lambda)
+                # Hpi = H_train_path + cur_diag + lam
+                Hm  = H_train_path + lam
+                Hpi = Hm + cur_diag
+                if self.cfg.vol_weighted_H:
+                    if vis_count==0:
+                        point_EIG = torch.tensor(0.)
+                    else:
+                        if criterion.lower() == "topt":
+                            point_EIG = - torch.sum(1.0 / torch.clamp(Hpi, min=1e-12))
+                        elif criterion.lower() == "dopt":
+                            point_EIG = torch.sum(torch.log(torch.clamp(Hpi, min=1e-12))) - torch.sum(torch.log(torch.clamp(Hm,  min=1e-12)))
+                else:
+                    # If no visible points, set point_EIG to 0 or set a penalty
+                    if vis_count==0:
+                        point_EIG = torch.tensor(0.) 
+                    else:
+                        if criterion.lower() == "topt":
+                            point_EIG = - torch.sum(1.0 / torch.clamp(Hpi, min=1e-12))
+                        elif criterion.lower() == "dopt":
+                            point_EIG = torch.sum(torch.log(torch.clamp(Hpi, min=1e-12))) - torch.sum(torch.log(torch.clamp(Hm,  min=1e-12)))
+                
+                # pose_EIG = torch.log(torch.linalg.det(pose_H))
+
+                curr_action.append(action)
+            
+                # total_path_EIG += self.cfg.path_pose_weight * pose_EIG.item()
+                # iterative cumulation
+                if (len(curr_action) + 1) % self.cfg.acc_H_train_every == 0:
+                    total_path_EIG += float(self.cfg.path_point_weight) * float(point_EIG.item())
+                    H_train_path = H_train_path + cur_diag
+
+                if action == 1:
+                    map_coord = future_pose[[0, 2], 3]
+                    world_path.append(map_coord)
+                    map_coord = self.policy.convert_to_map(map_coord)
+                    map_path.append(map_coord)
+
+            final_EIG_f = float(final_EIG.item() if hasattr(final_EIG, "item") else final_EIG)
+
+            if self.cfg.path_end_weight > 0:
+                total_path_EIG = total_path_EIG / len(curr_action) + float(self.cfg.object_path_end_weight) * final_EIG_f
+            else:
+                total_path_EIG = (total_path_EIG + final_EIG_f) / len(curr_action)
+
+            total_path_EIGs.append(total_path_EIG)
+
+            # select the best one
+            if total_path_EIG > best_path_EIG:
+                best_path_EIG = total_path_EIG
+                best_path = curr_action
+                best_goal = pose_np
+                best_global_path = paths
+                best_map_path = map_path
+                best_world_path = world_path
+
+        return best_path, best_map_path, best_goal, best_world_path, best_global_path
+
 
     def action_planning(self, global_points, current_agent_pose, gaussian_points, t):
         """
@@ -2016,7 +2133,7 @@ class NavTester(object):
                 
                 rel_pos = np.linalg.inv(future_pose) @ stage_goal_w
                 xz_rel_pos = rel_pos[[0, 2]]
-                print("Distance to stage goal: ", np.linalg.norm(xz_rel_pos), "Stage goal idx: ", stage_goal_idx)
+                # print("Distance to stage goal: ", np.linalg.norm(xz_rel_pos), "Stage goal idx: ", stage_goal_idx)
                 # Check if close the the final target pose
                 pose_np_w = pose_np[[0, 2], 3]  # x,z finali
                 final_goal_w = np.array([pose_np_w[0], future_pose[1, 3], pose_np_w[1], 1.0])
@@ -2084,7 +2201,7 @@ class NavTester(object):
                             xz_rel_pos = rel_pos[[0, 2]]
                         
                     angle = np.arctan2(xz_rel_pos[0], xz_rel_pos[1])
-                    print("Angle to stage goal: ", np.rad2deg(angle))
+                    # print("Angle to stage goal: ", np.rad2deg(angle))
                     if angle > np.radians(self.slam_config["turn_angle"]):
                         action = 3
                     elif angle < - np.radians(self.slam_config["turn_angle"]):
@@ -2146,13 +2263,13 @@ class NavTester(object):
                             # continue  # salta il resto e ricalcola dyaw nel prossimo ciclo
                         else:
                             d_to_wp = np.linalg.norm(xz_rel)
-                            print("Distance to waypoint: ", d_to_wp)
+                            # print("Distance to waypoint: ", d_to_wp)
                             if d_to_wp < step:
                                 stage_goal_idx += 1
                                 continue  # passa al prossimo waypoint
                             else:
                                 ang = np.arctan2(xz_rel[0], xz_rel[1])
-                                print("Angle to waypoint: ", np.rad2deg(ang))
+                                # print("Angle to waypoint: ", np.rad2deg(ang))
                                 act = 3 if ang >  turn else (2 if ang < -turn else 1)
                     # 2) Altrimenti (tutti i waypoint fatti), final approach alla posa target
                     else:
@@ -2169,11 +2286,11 @@ class NavTester(object):
                         xz_rel = rel[[0, 2]]
                         ang = np.arctan2(xz_rel[0], xz_rel[1])
                         d_to_wp = np.linalg.norm(xz_rel)
-                        print("GO TO THE TARGET POSE")
-                        print("Distance to final goal init: ", dist)
-                        print("Distance to final goal: ", d_to_wp)
-                        print("Distance to target yaw init : ", np.rad2deg(dyaw))
-                        print("Distance to target yaw : ", np.rad2deg(ang))
+                        # print("GO TO THE TARGET POSE")
+                        # print("Distance to final goal init: ", dist)
+                        # print("Distance to final goal: ", d_to_wp)
+                        # print("Distance to target yaw init : ", np.rad2deg(dyaw))
+                        # print("Distance to target yaw : ", np.rad2deg(ang))
                         # criterio di uscita: vicino e allineato
                         if (dist < 2.0 * step) and (abs(dyaw) <= turn):
                             break
@@ -2182,7 +2299,7 @@ class NavTester(object):
                         rel = np.linalg.inv(future_pose) @ target_w
                         xz_rel = rel[[0, 2]]
                         ang = np.arctan2(xz_rel[0], xz_rel[1])
-                        print("Angle to FINAL goal: ", np.rad2deg(ang))
+                        # print("Angle to FINAL goal: ", np.rad2deg(ang))
                         # priorità: allineati verso il target, poi avanza
                         act = 2 if dyaw >  turn else (3 if dyaw < -turn else 1)
 

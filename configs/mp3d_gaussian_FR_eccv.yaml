@@ -7,6 +7,8 @@ policy:
   name: gaussians_based # gaussians_based # frontier
   planning_queue_size: 30
 
+criterion: dopt # fisher, topt, dopt
+
 use_wandb: True
 
 H_reg_lambda: 0.000001
@@ -16,7 +18,7 @@ checkpoint_interval: 1000
 forward_step_size: 0.065
 turn_angle: 10.
 path_end_weight: 30.
-object_path_end_weight: 100.
+object_path_end_weight: 30. #30
 opacity_pixel_weight: 0.0001
 
 report_global_progress_every: 10
