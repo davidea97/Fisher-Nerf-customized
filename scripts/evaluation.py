@@ -241,9 +241,9 @@ def save_pointcloud_as_ply(pc, path, c2w=None):
 
     # --- merge: frame + istanze della primitive ai punti ---
     merged = o3d.geometry.TriangleMesh()
-    merged += world_frame
-    if cam_frame is not None:
-        merged += cam_frame
+    # merged += world_frame
+    # if cam_frame is not None:
+    #     merged += cam_frame
     for p in pc_np:
         m = o3d.geometry.TriangleMesh(base)  # copia
         m.translate(p.tolist())

@@ -69,6 +69,7 @@ from scripts.eval_3d_reconstruction import accuracy_comp_ratio_from_pcl
 
 from utils.object_reconstruction_utils import mask_border_contact, estimate_object_center, object_center_error, object_size_ratio, reached
 
+from test_utils import yaml_safe_load, yaml_safe_dump
 
 # FORMAT = "%(pathname)s:%(lineno)d %(message)s"
 OBJ_SCALE_FACTOR = 0.5
@@ -312,12 +313,15 @@ class NavTester(object):
         self.global_obj_pcd = o3d.geometry.PointCloud()
 
         if known_env is not None:
+            self.known_env_mode = True
             self.known_env_path = known_env
             print("Known env path: ", self.known_env_path)
             self.pcd_known_env = load_env_glb_pointcloud(self.known_env_path, apply_transform=habitat_transform)
             self.gt_3d_oriented_w = apply_transform_to_pointcloud(self.pcd_known_env, rotation_90_x)
+            # save_pointcloud_as_ply(self.gt_3d_oriented_w, "gt_scene.ply")
             self.tau_m = 0.2
         else:
+            self.known_env_mode = False
             self.known_env_path = None
             self.pcd_known_env = None
             self.gt_3d_oriented_w = None
@@ -330,10 +334,10 @@ class NavTester(object):
             self.camera_forward_offset = [1.3, 1.5, 2.0]
             self.dynamic_object_path = "habitat_example_objects_0.2/wheeled_robot"
             # find the glb file within the dynamic_object_path
-            obj_glb_files = glob.glob(os.path.join(self.options.root_path, self.dynamic_object_path, "*.glb"))
-            print("Object GLB files found:", obj_glb_files)
-            
-            obj_pts = load_glb_pointcloud(obj_glb_files[0])
+            self.obj_glb_files = glob.glob(os.path.join(self.options.root_path, self.dynamic_object_path, "*.glb"))
+            print("Object GLB files found:", self.obj_glb_files)
+
+            self.obj_pts = load_glb_pointcloud(self.obj_glb_files[0])
             rotation_m90_x = np.array([
                 [1., 0.,  0., 0.],
                 [0., 0., 1., 0],
@@ -341,9 +345,10 @@ class NavTester(object):
                 [0., 0.,  0., 1.]
             ])
 
-            gt_obj_3d_rotated = apply_transform_to_pointcloud(obj_pts, rotation_m90_x, scale=OBJ_SCALE_FACTOR)
+            self.gt_obj_3d_rotated = apply_transform_to_pointcloud(self.obj_pts, rotation_m90_x, scale=OBJ_SCALE_FACTOR)
+            # save_pointcloud_as_ply(self.gt_obj_3d_rotated, "gt_object.ply")
             self.obj_pcd = o3d.geometry.PointCloud()
-            self.obj_pcd.points = o3d.utility.Vector3dVector(gt_obj_3d_rotated)
+            self.obj_pcd.points = o3d.utility.Vector3dVector(self.gt_obj_3d_rotated)
             
             # self.dynamic_mesh = trimesh.load("path/to/object.glb")
             self.sim_obj = self.initialize_dynamic_object(self.dynamic_object_path, self.camera_forward_offset)
@@ -600,7 +605,7 @@ class NavTester(object):
         self.abs_agent_poses = []
 
         # init local policy
-        self.init_local_policy(slam, init_c2w, intrinsics, episode)
+        self.init_local_policy(slam, init_c2w, intrinsics, episode, known_env_mode=self.known_env_mode)
 
         agent_episode_distance = 0.0 # distance covered by agent at any given time in the episode
         previous_pos = self.habitat_ds.sim.sim.get_agent_state().position
@@ -668,13 +673,30 @@ class NavTester(object):
                 semantic_vis = d3_40_colors_rgb[semantic_obs_uint8]
 
                 camera_pose = utils.get_cam_transform(agent_state=self.habitat_ds.sim.sim.get_agent_state()) @ habitat_transform
-                if self.pcd_known_env is not None:
+                if self.known_env_mode == True:
                     c2w_t = torch.from_numpy(camera_pose).float().cuda()
                     inv_K_t = self.habitat_ds.inv_K.cuda().float()
                     H, W = self.habitat_ds.img_size
-                    
                     mask = novelty_mask_from_pcd_nn(self.gt_3d_oriented_w, depth_raw, inv_K_t, c2w_t, (H, W), z_forward="Z", dist_thresh_m=0.05, stride=1, frame_id=t)
 
+                    # self.policy.cover_fov_2d(c2w_t, fov_deg=90.0, max_range=4.0, ang_step_deg=2.0)
+                    # free_cells = (self.policy.occ_map[2] > 0).sum().item()
+                    # cov_cells  = self.policy.covered.sum().item()
+                    # if free_cells > 0 and (cov_cells / free_cells) >= 0.95:
+                    #     print(f">> Coverage complete: {(cov_cells/free_cells)*100:.1f}%")
+                    #     break
+
+                    # fronts = self.policy.build_frontier_cells()
+                    # if not fronts:
+                    #     print(">> No frontier left.")
+                    #     break
+
+                    # print("Frontier cells: ", len(fronts))
+                    # print("Fronts: ", fronts)
+
+                    # self.policy.visualize_occ_map(slam.get_latest_frame()[:3, 3])
+
+                    
                 # Store all the camera poses
                 saved_camera_poses.append(camera_pose.copy())
 
@@ -684,10 +706,11 @@ class NavTester(object):
                     # mask = self.project_points_to_image(self.obj_pcd, intrinsics, c2w, object_pose, image_shape)
                     # print(f"Mask {t} found object points: {np.sum(mask > 0)}")
                     object_mask = (observations_cpu["semantic"] == self.sim_obj.get_semantic_id()).astype(np.uint8) * 255
-                    
-                    if self.pcd_known_env is None:
+
+                    if self.known_env_mode == False:
                         object_mask_bw = cv2.cvtColor(object_mask, cv2.COLOR_GRAY2BGR)
                     else:
+                        mask = mask.astype(np.uint8)*255
                         object_mask_bw = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
                     if np.array(object_mask_bw).ndim == 3:
@@ -701,7 +724,9 @@ class NavTester(object):
                         masked_rgb[mask_bool] = rgb_bgr[mask_bool]
                         cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb_mask/masked_rgb_{t}.png"), masked_rgb)
 
-                        # self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, camera_pose, object_pose, keep_ratio=0.05, step=t)
+                        rgb_bgr_converted = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+                        self.store_filtered_obj_pointcloud(rgb_bgr_converted, depth_raw, intrinsics, object_mask_bw, camera_pose, object_pose, step=t)
+                        self.evaluate_3d_object_reconstruction(step=t)
 
                     # if self.dino_extraction:
                     #     dino_descriptors, selected_coord = extract_dino_features(rgb_bgr, object_mask_bw, dino_extractor)
@@ -741,9 +766,6 @@ class NavTester(object):
                 c2w_t = torch.from_numpy(c2w).float().cuda()
                 w2c_t = torch.linalg.inv(c2w_t)
                 
-                
-                # print("Camera pose: ", camera_pose)
-                # print("C2W new: ", c2w)
                 if self.policy_name == "gaussians_based":
                     ate = slam.track_rgbd(img, depth, w2c_t, action_id)
 
@@ -793,7 +815,8 @@ class NavTester(object):
                 else:
                     self.object_tracking = False
 
-                if not self.object_tracking:   
+                if not self.object_tracking:  
+                    self.evaluate_3d_object_reconstruction(step=t) 
                     if self.policy_name == "gaussians_based":
                         if (slam.cur_frame_idx) % self.slam_config["checkpoint_interval"] == 0 and slam.cur_frame_idx > 0:
                             save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
@@ -1011,7 +1034,10 @@ class NavTester(object):
                     # obj_2d_img = mask_border_contact(object_mask_bw)
                     # print("Border contact:", obj_2d_img) 
                     
-                    temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
+                    # temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
+                    # self.evaluate_3d_object_reconstruction(step=t)
+                    
+                    
                     # print("POINTS object: ", temp_obj_W_pts)
                     # temp_obj_center = estimate_object_center(temp_obj_W_pts)
                     # print("Estimated object center: ", temp_obj_center)
@@ -1147,7 +1173,7 @@ class NavTester(object):
         self.eval_navigation(slam, t)
 
         ###### Evaluation of the 3D reconstruction of the scene ######
-        # self.evaluate_3d_reconstruction()
+        self.evaluate_3d_reconstruction()
 
         if self.slam_config.use_wandb:
             wandb.finish()
@@ -1158,13 +1184,79 @@ class NavTester(object):
         slam.stop()
 
 
+    def evaluate_3d_object_reconstruction(self, step=0):
+        dist_th = 0.01
+        pcl_dir = os.path.join(self.policy_eval_dir, "pointcloud")
+        gt_obj_3d_reconstruction = self.gt_obj_3d_rotated
 
+        est_obj_pcl_file = get_latest_pcl_file(pcl_dir, obj=True)
+        print("Comparison with GT object model: ", est_obj_pcl_file)
+        if est_obj_pcl_file is not None:
+            est_obj_3d_reconstruction = load_ply_pointcloud(est_obj_pcl_file)
+            est_3d_rotated = apply_transform_to_pointcloud(est_obj_3d_reconstruction, habitat_transform)
 
+            acc, comp, ratio = accuracy_comp_ratio_from_pcl(gt_obj_3d_reconstruction, est_3d_rotated, dist_th=dist_th)
+            iacc, icomp, iratio = accuracy_comp_ratio_from_pcl(est_3d_rotated, gt_obj_3d_reconstruction, dist_th=dist_th)
+
+            fpr = (1-iratio)
+        else:
+            acc = comp = ratio = fpr = 0.0
+            iratio = 1.0
+        print(f"ACC (dist): {acc*100:.2f} cm, Completeness (dist): {comp*100:.2f} cm, Completeness (ratio): {ratio*100:.2f} %, FPR: {(1-iratio)*100:.2f} %")
+        # with open(os.path.join(self.policy_eval_dir, f"{self.policy_name}_results.txt"), "a") as f:
+        #     f.write(f"Object Evaluation:\n"
+        #             f"ACC (dist): {acc*100:.2f} cm, "
+        #             f"Completeness (dist): {comp*100:.2f} cm, "
+        #             f"Completeness (ratio): {ratio*100:.2f} %, "
+        #             f"FPR: {(1-iratio)*100:.2f} %\n")
+        metrics_dir = os.path.join(self.policy_eval_dir, "metrics")
+        yaml_path   = os.path.join(metrics_dir, "object_recon_metrics.yaml")
+        from datetime import datetime
+
+        new_row = {
+            "step": int(step),
+            # "distance_threshold_m": float(dist_th),
+            "acc_distance_m": float(acc*100),          # distanza media (accuracy)
+            "comp_distance_m": float(comp*100),        # distanza media (completeness)
+            "completeness_ratio": float(ratio*100),    # [0..1]
+            "fpr": float(fpr*100),                     # [0..1]
+            "est_pcl_path": str(est_obj_pcl_file),
+        }
+
+        data = yaml_safe_load(yaml_path)
+        if data is None:
+            data = {
+                "experiment": {
+                    "policy_name": getattr(self, "policy_name", "unknown"),
+                    "scene_id":    getattr(self, "scene_id", "unknown"),
+                },
+                "settings": {
+                    "distance_threshold_m": float(dist_th),
+                },
+                "steps": [],     # lista di entry per step
+                "summary": {},   # riempita in seguito (AUC/finali)
+            }
+
+        data["steps"].append(new_row)
+        # tieni ordinati per step (nel caso scrivi fuori ordine)
+        data["steps"] = sorted(data["steps"], key=lambda r: r["step"])
+        yaml_safe_dump(data, yaml_path)
+
+        # (facoltativo) CSV semplice
+        # try:
+        #     import csv
+        #     csv_path = os.path.join(metrics_dir, "object_recon_metrics.csv")
+        #     os.makedirs(metrics_dir, exist_ok=True)
+        #     write_header = not os.path.exists(csv_path)
+        #     with open(csv_path, "a", newline="") as f:
+        #         w = csv.DictWriter(f, fieldnames=list(new_row.keys()))
+        #         if write_header:
+        #             w.writeheader()
+        #         w.writerow(new_row)
+        # except Exception as e:
+        #     print("[warn] CSV dump failed:", e)
 
     def evaluate_3d_reconstruction(self):
-        
-        
-
         gt_3d_reconstruction = load_glb_pointcloud(os.path.join(self.options.root_path, self.options.dataset, self.options.scenes_list[0], self.options.scenes_list[0] + ".glb"))
         # est_3d_reconstruction = load_ply_pointcloud(os.path.join(self.policy_eval_dir, "pointcloud", "global_pcl_{}.ply".format(self.options.max_steps)))
         pcl_dir = os.path.join(self.policy_eval_dir, "pointcloud")
@@ -1177,11 +1269,11 @@ class NavTester(object):
         
         # save_pointcloud_as_ply(est_3d_reconstruction, os.path.join(self.policy_eval_dir, "original_est_scene_ply.ply"))
         est_3d_rotated = apply_transform_to_pointcloud(est_3d_reconstruction, habitat_transform)
-        save_pointcloud_as_ply(est_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_est_scene_ply.ply"))
+        # save_pointcloud_as_ply(est_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_est_scene_ply.ply"))
 
         # save_pointcloud_as_ply(gt_3d_reconstruction, os.path.join(self.policy_eval_dir, "original_gt_scene_glb.ply"))
         gt_3d_rotated = apply_transform_to_pointcloud(gt_3d_reconstruction, rotation_90_x)
-        save_pointcloud_as_ply(gt_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_gt_scene_pcl.ply"))
+        # save_pointcloud_as_ply(gt_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_gt_scene_pcl.ply"))
 
         # coverage = calculate_coverage_percentage(gt_3d_rotated, est_3d_rotated)
         # print(f"#### Scene : {self.options.scenes_list[0]} ####")
@@ -1213,11 +1305,11 @@ class NavTester(object):
             
             # save_pointcloud_as_ply(est_obj_3d_reconstruction, "original_ply.ply")
             est_obj_3d_rotated = apply_transform_to_pointcloud(est_obj_3d_reconstruction, habitat_transform)
-            save_pointcloud_as_ply(est_obj_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_est_obj.ply"))
+            # save_pointcloud_as_ply(est_obj_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_est_obj.ply"))
 
             # save_pointcloud_as_ply(gt_obj_3d_reconstruction, "original_glb.ply")
             gt_obj_3d_rotated = apply_transform_to_pointcloud(gt_obj_3d_reconstruction, rotation_m90_x, scale=OBJ_SCALE_FACTOR)
-            save_pointcloud_as_ply(gt_obj_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_gt_obj.ply"))
+            # save_pointcloud_as_ply(gt_obj_3d_rotated, os.path.join(self.policy_eval_dir, "rotated_gt_obj.ply"))
 
             acc, comp, ratio = accuracy_comp_ratio_from_pcl(gt_obj_3d_rotated, est_obj_3d_rotated, dist_th=0.01)
             iacc, icomp, iratio = accuracy_comp_ratio_from_pcl(est_obj_3d_rotated, gt_obj_3d_rotated, dist_th=0.01)
@@ -1414,7 +1506,6 @@ class NavTester(object):
             pixel_z = min( max( int(math.floor((pos[2] - scene_bounds_lower[2]) / meter_per_pixel)), 0), top_down_map.shape[0] - 1 )
             top_down_map[pixel_z, pixel_x] = color
 
-        
         # for t in range(slam.cur_frame_idx):
         #     # Get the current estimated rotation & translation
         #     curr_w2c = torch.eye(4).cuda()
@@ -1646,7 +1737,7 @@ class NavTester(object):
                                             agent_pose=current_agent_pos)
         else:
             global_points, EIGs, random_gaussian_params = \
-                self.policy.global_object_planning(obj_slam.pose_eval_popgs_blocks, gaussian_points, gaussian_points_scene, pose_proposal_fn, \
+                self.policy.global_object_planning(obj_slam.pose_eval_popgs, gaussian_points, gaussian_points_scene, pose_proposal_fn, \
                                             expansion=expansion, visualize=True, \
                                             agent_pose=current_agent_pos, criterion=criteria)
         
@@ -2379,7 +2470,7 @@ class NavTester(object):
     def init_local_policy(self, slam,
                         init_c2w,
                         intrinsics,
-                        episode = None) -> queue.Queue:
+                        episode = None, known_env_mode=False) -> queue.Queue:
         """
         Init the local policy
 
@@ -2391,6 +2482,10 @@ class NavTester(object):
         self.action_queue = queue.Queue(maxsize=100)
         
         if self.policy_name in ["gaussians_based", "frontier", "random_walk"]:
+            # if self.known_env_mode: 
+            #     self.policy.init_known_env_from_known_env(init_c2w, self.gt_3d_oriented_w)
+            # else:
+            #     self.policy.init(init_c2w, intrinsics)
             self.policy.init(init_c2w, intrinsics)
             print("Init Astar Policy: ", self.policy_name)
             if slam.cur_frame_idx > 0:

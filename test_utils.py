@@ -14,6 +14,18 @@ from scripts.evaluation import save_pointcloud_as_ply
 import cv2
 import trimesh
 from scipy.spatial import cKDTree
+import yaml
+
+def yaml_safe_load(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+def yaml_safe_dump(data, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
 
 
 def draw_map(sim, height, meters_per_pixel = 0.1, use_sim=False, map_res=768):

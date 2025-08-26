@@ -56,6 +56,12 @@ class AstarPlanner:
         if self.frontier_select_method == "vlm":
             self.vlm = VLMFrontierSelection()
 
+        # DAVIDE
+        self.covered=None
+        self.known_env = False
+        self.frontier_radius = 1
+
+
     def init(self, pose, intrinsic, scene_bounds = None):
         """ 
         Init the Astar Planner 
@@ -98,6 +104,83 @@ class AstarPlanner:
 
         self.map_center = torch.from_numpy(map_center_np).to(self.device)
         self.frame_idx = 0
+
+    def init_known_env_from_known_env(self, pose, env_pcd_world, max_lines=20000):
+        """ 
+        Init the Astar Planner 
+        
+        Args:
+            pose: (4, 4) torch.Tensor, the camera pose in world coordinate
+            intrinsic: (3, 3) torch.Tensor, the camera intrinsic matrix
+            scene_bounds: (2, 3) np.ndarray, the scene bounds
+        """
+        # set up bounds for scene
+        self.grid_dim = np.array([768, 768])
+        H, W = self.grid_dim
+        grid   = torch.empty(3, H, W, device=self.device)
+        # The initial position is at the center
+        map_center_np = pose[[0, 2], 3]
+        
+        # initialize map
+        self.occ_map = torch.zeros((3, self.grid_dim[1], self.grid_dim[0]), device=self.device)
+        occ_map = torch.zeros_like(self.occ_map)
+        # all map cells are initialized as unknown
+        self.occ_map[0] = 1.
+
+        cam_pos_x = int((pose[0, 3] - map_center_np[0]) / self.cell_size + self.grid_dim[0] // 2)
+        cam_pos_z = int((pose[2, 3] - map_center_np[1]) / self.cell_size + self.grid_dim[1] // 2)
+        self.cam_pos = np.array([cam_pos_z, cam_pos_x])
+
+        # set the current robot location as free
+        self.occ_map[2, cam_pos_z-1:cam_pos_z+2, cam_pos_x-1:cam_pos_x+2] = 2.
+
+        self.map_center = torch.from_numpy(map_center_np).to(self.device)
+        self.frame_idx = 0
+
+        grid.fill_(0.)
+        pc = env_pcd_world.to(self.device, dtype=torch.float32)
+        map_coords = map_utils.discretize_coords(
+            pc[:, 0], pc[:, 2], self.grid_dim, self.cell_size, self.map_center
+        )  # (M,2) int: [ix, iz]
+
+        # all particles are treated as free
+        occ_lbl = torch.ones((pc.shape[1], 1), device=pc.device).long() * 2
+        y = pc[:, 1]
+        valid_sgn = torch.bitwise_and(y >= self.height_lower, y <= self.height_upper)
+        pc_occ = pc[valid_sgn]  # (M,3)
+
+        concatenated = torch.cat([map_coords[valid_sgn], occ_lbl[valid_sgn]], dim=-1)
+        unique_values, counts = torch.unique(concatenated, dim=0, return_counts=True)
+        grid[unique_values[:, 2], unique_values[:, 1], unique_values[:, 0]] = counts + 1e-5
+
+        # accumula sul temporaneo
+        occ_map += 0.01 * grid
+        
+        grid.fill_(0.)
+        
+
+        # ---- FREE: linee dal robot alle celle occupied (come fai tu) ----
+        # prendi le (z,x) delle celle occupied uniche
+        occ_z = unique_values[:, 1].detach().cpu().numpy()
+        occ_x = unique_values[:, 0].detach().cpu().numpy()
+
+        # opzionale: limita numero di linee per performance
+        if max_lines is not None and len(occ_z) > max_lines:
+            idx = np.random.choice(len(occ_z), size=max_lines, replace=False)
+            occ_z = occ_z[idx]; occ_x = occ_x[idx]
+
+        line_canvas = np.zeros((H, W), dtype=np.uint8)
+        for z, x in zip(occ_z, occ_x):
+            p_z, p_x = int(z), int(x)
+            # disegna la linea 2D come nel tuo update
+            line_canvas = cv2.line(line_canvas, (p_x, p_z), (cam_pos_x, cam_pos_z), 1, 1)
+
+        free_z, free_x = np.where(line_canvas > 0)
+        occ_map[2, free_z, free_x] = 1.  # free lungo i raggi
+
+        # ---- normalizzazione e fusione come nel tuo codice ----
+        denom = (occ_map.sum(dim=0, keepdim=True) + 1e-5)
+        self.occ_map += occ_map / denom
 
     def save(self, save_path):
         torch.save(
@@ -216,6 +299,67 @@ class AstarPlanner:
         occ_map[2, free_z, free_x] = 1.
 
         self.occ_map += occ_map / (occ_map.sum(dim=0, keepdim=True) + 1e-5)
+
+    ######## DAVIDE ########
+    def _grid_ij_from_world(self, x, z):
+        gx = int((x - self.map_center[0].item()) / self.cell_size + self.grid_dim[0] // 2)
+        gz = int((z - self.map_center[1].item()) / self.cell_size + self.grid_dim[1] // 2)
+        return gx, gz
+
+    def _yaw_from_pose(self, c2w):
+        # forward -Z nel frame camera → world
+        # usa get_agent_state().rotation se preferisci; qui dedotto da c2w
+        R = c2w[:3, :3].detach().cpu().numpy()
+        fwd = R @ np.array([0, 0, -1], dtype=np.float32)
+        return float(np.arctan2(fwd[2], fwd[0]))  # atan2(z,x)
+
+    def _bresenham(self, i0, j0, i1, j1):
+        di, dj = abs(i1-i0), abs(j1-j0)
+        si, sj = (1 if i1>=i0 else -1), (1 if j1>=j0 else -1)
+        err = di - dj
+        i, j = i0, j0
+        while True:
+            yield i, j
+            if i==i1 and j==j1: break
+            e2 = 2*err
+            if e2 > -dj: err -= dj; i += si
+            if e2 <  di: err += di; j += sj
+    
+    def cover_fov_2d(self, c2w: torch.Tensor, fov_deg=90.0, max_range=4.0, ang_step_deg=2.0):
+        H, W = self.covered.shape
+        x, z = c2w[0,3].item(), c2w[2,3].item()
+        gx, gz = self._grid_ij_from_world(x, z)
+        if not (0 <= gx < W and 0 <= gz < H): return
+        yaw = self._yaw_from_pose(c2w)
+        half = np.deg2rad(fov_deg)*0.5
+        angs = np.arange(-half, half+1e-6, np.deg2rad(ang_step_deg), dtype=np.float32)
+        for da in angs:
+            a = yaw + da
+            x1 = x + max_range*np.cos(a); z1 = z + max_range*np.sin(a)
+            g1x, g1z = self._grid_ij_from_world(x1, z1)
+            for i,j in self._bresenham(gx, gz, g1x, g1z):
+                if not (0<=i<W and 0<=j<H): break
+                if self.occ_map[2, j, i] > 0:  # free
+                    self.covered[j, i] = True
+                else:
+                    break
+    
+    def build_frontier_cells(self):
+        """Ritorna lista di (j,i) fronteira: free & !covered & adiacenti a covered."""
+        H, W = self.covered.shape
+        covered = self.covered
+        free = self.occ_map[2] > 0
+        unknown = ~covered  # inesplorato = non visto
+        # adiacenza 4-neigh
+        adj = torch.zeros_like(covered)
+        adj[:-1] |= covered[1:]
+        adj[1:]  |= covered[:-1]
+        adj[:, :-1] |= covered[:, 1:]
+        adj[:, 1:]  |= covered[:, :-1]
+        fr = (unknown & free & adj)
+        js, is_ = torch.where(fr)
+        return list(zip(js.tolist(), is_.tolist()))
+    ##########################
 
     def build_connected_occupied_space(self, gaussian_points=None):
         
@@ -855,6 +999,30 @@ class AstarPlanner:
         # print("Poses: ", poses.shape, "Scores: ", scores.shape)
         return poses, scores, random_gaussian_params
     
+    def visualize_occ_map(self, agent_pose=None, fronts=None):
+        occ_map = self.occ_map.argmax(0) == 1
+        binarymap = occ_map.cpu().numpy().astype(np.uint8)
+        
+        # dilate binary map
+        kernel = np.ones((3, 3), np.uint8)  
+        binarymap = cv2.dilate(binarymap, kernel)
+
+        #to RGB
+        vis_map = np.zeros((binarymap.shape[0],binarymap.shape[1],3), np.uint8)
+        vis_map[:,:,0][binarymap!=0] = 255
+        vis_map[:,:,1][binarymap!=0] = 255
+        vis_map[:,:,2][binarymap!=0] = 255
+
+    
+        # agent position
+        pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
+        vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+
+        os.makedirs(os.path.join(self.eval_dir, "maps_known_env"), exist_ok=True)
+        plt.imsave(os.path.join(self.eval_dir, "maps_known_env", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
+        plt.close()
+
+
 
     def global_planning_frontier(self, expansion=1, visualize=True, 
                         agent_pose=None, last_goal = None, slam=None):
@@ -1123,14 +1291,15 @@ class AstarPlanner:
             end_world_z = best_pose[2, 3].item() + dir_z * (arrow_len * self.cell_size)
             end = self.convert_to_map([end_world_x, end_world_z])
 
-            cv2.arrowedLine(vis_map, start, (end[0], end[1]), (0, 255, 255), 2, tipLength=0.35) 
+            # cv2.arrowedLine(vis_map, start, (end[0], end[1]), (0, 255, 255), 2, tipLength=0.35) 
             
             # candidate poses
             normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
             for score, pose in zip(normalized_scores, poses):
                 heatcolor = heatmap(score.item())[:3]
                 pt = self.convert_to_map([pose[0,3],pose[2,3]])
-                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+                # vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (0, 255, 0), -1)
                 # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
             
 
@@ -1153,8 +1322,8 @@ class AstarPlanner:
 
             # agent position
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
-            cv2.circle(vis_map, (pt[0], pt[1]), 4, (255, 0, 0), 2) 
-            vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+            # cv2.circle(vis_map, (pt[0], pt[1]), 4, (255, 0, 0), 2) 
+            # vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
             
             os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
             plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)

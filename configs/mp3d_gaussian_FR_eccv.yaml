@@ -1,13 +1,13 @@
 
 workdir: experiments/GaussianSLAM
-run_name: obj_act_map
+run_name: obj_act_map_test
 
 # planning parameters
 policy: 
   name: gaussians_based # gaussians_based # frontier
   planning_queue_size: 30
 
-criterion: dopt # fisher, topt, dopt
+criterion: fisher # fisher, topt, dopt
 
 use_wandb: True
 
