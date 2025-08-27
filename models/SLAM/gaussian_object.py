@@ -1396,7 +1396,7 @@ class GaussianObjectSLAM:
         for keyframe in self.keyframe_list:
             w2c = keyframe['est_w2c']
 
-            cur_H = self.compute_Hessian( w2c, return_points=True, random_gaussian_params=False)
+            cur_H = self.compute_Hessian( w2c, return_points=True, random_gaussian_params=random_gaussians)
             if H_train is None:
                 H_train = torch.zeros(*cur_H.shape, device=cur_H.device, dtype=cur_H.dtype)
             H_train += cur_H
@@ -1443,7 +1443,7 @@ class GaussianObjectSLAM:
        
     def pose_eval(self, poses, random_gaussian_params=None, criterion=None):
         """ Compute pose scores for the poses """
-        H_train = self.compute_H_train()    # Information gain matrix for keyframes until now
+        H_train = self.compute_H_train(random_gaussian_params)    # Information gain matrix for keyframes until now
         H_train_inv = torch.reciprocal(H_train + 0.1)
 
         scores = []
@@ -1452,9 +1452,12 @@ class GaussianObjectSLAM:
         for cam_id, c2w in enumerate(tqdm(poses, desc="Examing Hessains")):
             # compute cur H
             w2c = torch.linalg.inv(c2w)
-            cur_H = self.compute_Hessian( w2c, return_points=True, random_gaussian_params=False)
+            # cur_H = self.compute_Hessian( w2c, return_points=True, random_gaussian_params=False)
+            cur_H = self.compute_Hessian( w2c, return_points=True, random_gaussian_params=random_gaussian_params)
 
-            self.render_at_pose(c2w, random_gaussian_params)
+            t=self.render_at_pose(c2w, random_gaussian_params)
+            # plt.imsave("./experiments/debug_render-mask.png", t["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
+
             
             view_score = torch.sum(cur_H * H_train_inv).item() # Aggregated score for the view
             
@@ -1509,16 +1512,34 @@ class GaussianObjectSLAM:
 
     def pose_eval_popgs_blocks(self, poses, random_gaussian_params=None, criterion:str="topt", K:int=6, lam:float=1e-6,
                            use_rot=True, use_scale=True, use_opacity=True):
-        Hm_blocks, _ = self.compute_H_train_blocks(K=K, use_rot=use_rot, use_scale=use_scale, use_opacity=use_opacity)
+        Hm_blocks, train_vis_idx = self.compute_H_train_blocks(K=K, use_rot=use_rot, use_scale=use_scale, use_opacity=use_opacity)
         scores = []
         navigable_c2ws = []
         for c2w in tqdm(poses, desc=f"POp-GS blocks [{criterion}]"):
             w2c = torch.linalg.inv(c2w)
-            Jb, _ = self.estimate_block_JtJ(w2c, K=K, use_rot=use_rot, use_scale=use_scale, use_opacity=use_opacity)
+            Jb, cur_vis_idx = self.estimate_block_JtJ(w2c, K=K, use_rot=use_rot, use_scale=use_scale, use_opacity=use_opacity)
             self.render_at_pose(c2w, random_gaussian_params)
-            Nv = min(Hm_blocks.shape[0], Jb.shape[0])
-            Hb = Hm_blocks[:Nv]
-            J  = Jb[:Nv]
+            # Nv = min(Hm_blocks.shape[0], Jb.shape[0])
+            # Hb = Hm_blocks[:Nv]
+            # J  = Jb[:Nv]
+            train_vis_idx_np = train_vis_idx.detach().cpu().numpy()
+            cur_vis_idx_np   = cur_vis_idx.detach().cpu().numpy()
+
+            inter, idx_train, idx_cur = np.intersect1d(
+                train_vis_idx_np, cur_vis_idx_np, return_indices=True
+            )
+
+            # torna in torch
+            inter      = torch.from_numpy(inter).to(train_vis_idx.device)
+            idx_train  = torch.from_numpy(idx_train).to(train_vis_idx.device)
+            idx_cur    = torch.from_numpy(idx_cur).to(train_vis_idx.device)
+            if inter.numel() == 0:
+                # opzionale: assegna punteggio molto basso o salta
+                scores.append(float('-inf')); navigable_c2ws.append(c2w)
+                continue
+
+            Hb = Hm_blocks[idx_train]
+            J  = Jb[idx_cur]
             if criterion.lower()=="topt":
                 score = self.t_opt_blocks(Hb, J, lam)  
             elif criterion.lower() == "dopt":
@@ -1690,83 +1711,194 @@ class GaussianObjectSLAM:
             })
         
     @torch.enable_grad()
-    def compute_Hessian(self, rel_w2c, return_points = False, 
-                        random_gaussian_params = False, 
-                        return_pose = False):
-        """
-            Compute uncertainty at candidate pose
-                params: Gaussian slam params
-                candidate_trans: (3, )
-                candidate_rot: (4, )
-                return_points:
-                    if True, then the Hessian matrix is returned in shape (N, C), 
-                    else, it is flatten in 1-D.
+    # def compute_Hessian(self, rel_w2c, return_points = False, 
+    #                     random_gaussian_params = False, 
+    #                     return_pose = False):
+    #     """
+    #         Compute uncertainty at candidate pose
+    #             params: Gaussian slam params
+    #             candidate_trans: (3, )
+    #             candidate_rot: (4, )
+    #             return_points:
+    #                 if True, then the Hessian matrix is returned in shape (N, C), 
+    #                 else, it is flatten in 1-D.
 
+    #     """
+    #     if isinstance(rel_w2c, np.ndarray):
+    #         rel_w2c = torch.from_numpy(rel_w2c).cuda()
+    #     rel_w2c = rel_w2c.float()
+
+    #     # transform to candidate frame
+    #     with torch.no_grad():
+    #         pts = self.params['means3D']
+    #         pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+    #         pts4 = torch.cat((pts, pts_ones), dim=1)
+
+    #         transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
+    #         rgb_colors = self.params['rgb_colors']
+    #         rotations = F.normalize(self.params['unnorm_rotations'])
+    #         opacities = torch.sigmoid(self.params['logit_opacities'])
+    #         scales = torch.exp(self.params['log_scales'])
+            
+    #         if scales.shape[-1] == 1: # isotropic
+    #             scales = torch.tile(scales, (1, 3))
+
+    #     num_points = transformed_pts.shape[0]
+    #     rendervar = {
+    #         'means3D': transformed_pts.requires_grad_(True),
+    #         'colors_precomp': rgb_colors.requires_grad_(True),
+    #         'rotations': rotations.requires_grad_(True),
+    #         'opacities': opacities.requires_grad_(True),
+    #         'scales': scales.requires_grad_(True),
+    #         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
+    #     }
+    #     params_keys = ["means3D", "rgb_colors", "unnorm_rotations", "logit_opacities", "log_scales"]
+
+    #     # for means3D, rotation won't change sum of square since R^T R = I
+    #     rendervar['means2D'].retain_grad()
+    #     im, radius, _, = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
+    #     im.backward(gradient=torch.ones_like(im) * 1e-3)
+
+    #     # print("Radius: ", radius)
+    #     visible = (radius > 0)
+    #     vis_count = int(visible.sum().item())
+    #     # print(f"Visible Points: {vis_count} / {num_points}")
+    #     parts = [
+    #         transformed_pts.grad.detach().reshape(num_points, -1),  # means3D
+    #         opacities.grad.detach().reshape(num_points, -1)        # α
+    #     ]
+    #     parts.append(scales.grad.detach().reshape(num_points, -1))     # se vuoi le scale
+    #     parts.append(rotations.grad.detach().reshape(num_points, -1))  # se vuoi le rotazioni
+    #     if return_points:
+    #         # cur_H = torch.cat([transformed_pts.grad.detach().reshape(num_points, -1),  
+    #         #                     opacities.grad.detach().reshape(num_points, -1)], dim=1)
+    #         cur_H = torch.cat(parts, dim=1)
+
+    #     else:
+    #         # cur_H = torch.cat([transformed_pts.grad.detach().reshape(-1), 
+    #         #                     opacities.grad.detach().reshape(-1)])
+    #         cur_H = torch.cat(parts)
+            
+            
+    #     # set grad to zero
+    #     for k, v in rendervar.items():
+    #         v.grad.fill_(0.)
+
+    #     if not return_pose:
+    #         return cur_H
+    #     else:
+    #         return cur_H, torch.eye(6).cuda(), vis_count
+    
+
+    def compute_Hessian(self, rel_w2c, return_points=False, random_gaussian_params=None, return_pose=False):
+        
+        """
+        Calcola la 'Hessiana' (qui: J-accum) alla posa candidata.
+        Se random_gaussian_params è fornito, concatena quelle gaussiane ai parametri correnti.
         """
         if isinstance(rel_w2c, np.ndarray):
             rel_w2c = torch.from_numpy(rel_w2c).cuda()
         rel_w2c = rel_w2c.float()
 
-        # transform to candidate frame
+        device = "cuda"
         with torch.no_grad():
-            pts = self.params['means3D']
-            pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
-            pts4 = torch.cat((pts, pts_ones), dim=1)
+            # -------- base scene gaussians --------
+            base_means = self.params['means3D']                              # (N,3) world
+            ones = torch.ones(base_means.shape[0], 1, device=device, dtype=torch.float32)
+            base_means4 = torch.cat([base_means, ones], dim=1)
+            base_means_cam = (rel_w2c @ base_means4.T).T[:, :3]              # (N,3) camera
 
-            transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
-            rgb_colors = self.params['rgb_colors']
-            rotations = F.normalize(self.params['unnorm_rotations'])
-            opacities = torch.sigmoid(self.params['logit_opacities'])
-            scales = torch.exp(self.params['log_scales'])
-            if scales.shape[-1] == 1: # isotropic
-                scales = torch.tile(scales, (1, 3))
+            base_rot = F.normalize(self.params['unnorm_rotations'])          # (N,4) o (N,3) a seconda
+            base_op = torch.sigmoid(self.params['logit_opacities'])          # (N,1)
+            base_sc = torch.exp(self.params['log_scales'])                   # (N,1|3)
+            if base_sc.shape[-1] == 1:
+                base_sc = torch.tile(base_sc, (1, 3))                        # (N,3)
 
-        num_points = transformed_pts.shape[0]
+            # Colori (non li usiamo nel "parts", ma il renderer li richiede)
+            base_col = self.params.get('rgb_colors', None)
+            if base_col is None:
+                # fallback neutro
+                base_col = torch.full((base_means.shape[0], 3), 0.5, device=device, dtype=torch.float32)
+
+            # -------- random gaussians (opzionale) --------
+            if random_gaussian_params is not None and random_gaussian_params is not False:
+                rg = random_gaussian_params
+                # keys attese: means3D (world), rotations (N,4), opacity (N,1), scales (N,3), shs (dummy)
+                rg_means_w = rg['means3D'].to(device=device, dtype=torch.float32)
+                ones_rg = torch.ones(rg_means_w.shape[0], 1, device=device, dtype=torch.float32)
+                rg_means4 = torch.cat([rg_means_w, ones_rg], dim=1)
+                rg_means_cam = (rel_w2c @ rg_means4.T).T[:, :3]              # (Nr,3)
+
+                rg_rot = rg['rotations'].to(device=device, dtype=torch.float32)
+                # opacities: in input è "opacity" in [0,1]; la usiamo direttamente (no logit)
+                rg_op = rg['opacity'].to(device=device, dtype=torch.float32) # (Nr,1)
+                rg_sc = rg['scales'].to(device=device, dtype=torch.float32)  # (Nr,3)
+
+                # colori neutri anche per le random
+                rg_col = torch.full((rg_means_w.shape[0], 3), 0.5, device=device, dtype=torch.float32)
+
+                # -------- concat --------
+                means_cam = torch.cat([base_means_cam, rg_means_cam], dim=0)
+                rotations = torch.cat([base_rot, rg_rot], dim=0)
+                opacities = torch.cat([base_op, rg_op], dim=0)
+                scales    = torch.cat([base_sc, rg_sc], dim=0)
+                colors    = torch.cat([base_col, rg_col], dim=0)
+
+            else:
+                means_cam = base_means_cam
+                rotations = base_rot
+                opacities = base_op
+                scales    = base_sc
+                colors    = base_col
+
+        num_points = means_cam.shape[0]
+
+        # Build rendervar (richiede gradienti per i parametri che vuoi valutare)
         rendervar = {
-            'means3D': transformed_pts.requires_grad_(True),
-            'colors_precomp': rgb_colors.requires_grad_(True),
-            'rotations': rotations.requires_grad_(True),
-            'opacities': opacities.requires_grad_(True),
-            'scales': scales.requires_grad_(True),
-            'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
+            'means3D':       means_cam.requires_grad_(True),
+            'colors_precomp': colors.requires_grad_(True),      # gradient non usato nei 'parts', ma ok lasciarlo
+            'rotations':     rotations.requires_grad_(True),
+            'opacities':     opacities.requires_grad_(True),
+            'scales':        scales.requires_grad_(True),
+            'means2D':       torch.zeros_like(means_cam, requires_grad=True, device=device)
         }
-        params_keys = ["means3D", "rgb_colors", "unnorm_rotations", "logit_opacities", "log_scales"]
 
-        # for means3D, rotation won't change sum of square since R^T R = I
         rendervar['means2D'].retain_grad()
-        im, radius, _, = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
+
+        # Backward su immagine aggregata
+        im, radius, _ = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
+        # piccolo grad costante (come nel tuo codice)
         im.backward(gradient=torch.ones_like(im) * 1e-3)
 
-        # print("Radius: ", radius)
         visible = (radius > 0)
         vis_count = int(visible.sum().item())
-        # print(f"Visible Points: {vis_count} / {num_points}")
-        parts = [
-            transformed_pts.grad.detach().reshape(num_points, -1),  # means3D
-            opacities.grad.detach().reshape(num_points, -1)        # α
-        ]
-        parts.append(scales.grad.detach().reshape(num_points, -1))     # se vuoi le scale
-        parts.append(rotations.grad.detach().reshape(num_points, -1))  # se vuoi le rotazioni
-        if return_points:
-            # cur_H = torch.cat([transformed_pts.grad.detach().reshape(num_points, -1),  
-            #                     opacities.grad.detach().reshape(num_points, -1)], dim=1)
-            cur_H = torch.cat(parts, dim=1)
 
+        # Parti con grad per ciascun parametro (ordine coerente col tuo uso corrente)
+        parts = [
+            rendervar['means3D'].grad.detach().reshape(num_points, -1),   # means3D
+            rendervar['opacities'].grad.detach().reshape(num_points, -1), # α
+            rendervar['scales'].grad.detach().reshape(num_points, -1),    # scale
+            rendervar['rotations'].grad.detach().reshape(num_points, -1), # rot
+        ]
+
+        if return_points:
+            cur_H = torch.cat(parts, dim=1)           # (N, C)
         else:
-            # cur_H = torch.cat([transformed_pts.grad.detach().reshape(-1), 
-            #                     opacities.grad.detach().reshape(-1)])
-            cur_H = torch.cat(parts)
-            
-            
-        # set grad to zero
-        for k, v in rendervar.items():
-            v.grad.fill_(0.)
+            cur_H = torch.cat(parts).reshape(-1)      # (N*C,)
+
+        # pulizia gradienti
+        for k,v in rendervar.items():
+            if isinstance(v, torch.Tensor) and v.grad is not None:
+                v.grad.zero_()
 
         if not return_pose:
             return cur_H
         else:
-            return cur_H, torch.eye(6).cuda(), vis_count
-    
+            # Pose-Hessiana: placeholder identità (come nel tuo codice)
+            return cur_H, torch.eye(6, device=device), vis_count
+        
+
+
     @torch.enable_grad()
     def estimate_diag_JtJ_simple(self, 
                                   w2c: torch.Tensor, 

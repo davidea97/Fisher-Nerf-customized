@@ -1269,8 +1269,8 @@ class AstarPlanner:
             # posizione in mondo -> pixel mappa
             best_pt = self.convert_to_map([best_pose[0, 3].item(), best_pose[2, 3].item()])
 
-            # cv2.circle(vis_map, (best_pt[0], best_pt[1]), 3, (0, 255, 255), -1)  # fill
-            # cv2.circle(vis_map, (best_pt[0], best_pt[1]), 4, (255, 255, 255), 2) 
+            cv2.circle(vis_map, (best_pt[0], best_pt[1]), 3, (0, 255, 255), -1)  # fill
+            cv2.circle(vis_map, (best_pt[0], best_pt[1]), 4, (255, 255, 255), 2) 
             
             R = best_pose[:3, :3]
             # yaw coerente con il tuo codice (atan2(pose[0,2], pose[2,2]))
@@ -1291,15 +1291,15 @@ class AstarPlanner:
             end_world_z = best_pose[2, 3].item() + dir_z * (arrow_len * self.cell_size)
             end = self.convert_to_map([end_world_x, end_world_z])
 
-            # cv2.arrowedLine(vis_map, start, (end[0], end[1]), (0, 255, 255), 2, tipLength=0.35) 
+            cv2.arrowedLine(vis_map, start, (end[0], end[1]), (0, 255, 255), 2, tipLength=0.35) 
             
             # candidate poses
             normalized_scores = (scores - scores.min()) / (scores.max() - scores.min())
             for score, pose in zip(normalized_scores, poses):
                 heatcolor = heatmap(score.item())[:3]
                 pt = self.convert_to_map([pose[0,3],pose[2,3]])
-                # vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
-                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (0, 255, 0), -1)
+                vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (int(heatcolor[0]*255), int(heatcolor[1]*255), int(heatcolor[2]*255)), -1)
+                # vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 1, (0, 255, 0), -1)
                 # vis_map[pt[1],pt[0],:] = np.array([0,0,255])
             
 
@@ -1322,8 +1322,8 @@ class AstarPlanner:
 
             # agent position
             pt = self.convert_to_map([agent_pose[0],agent_pose[2]])
-            # cv2.circle(vis_map, (pt[0], pt[1]), 4, (255, 0, 0), 2) 
-            # vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
+            cv2.circle(vis_map, (pt[0], pt[1]), 4, (255, 0, 0), 2) 
+            vis_map = cv2.circle(vis_map, (pt[0],pt[1]), 2, (255,0,0), -1)
             
             os.makedirs(os.path.join(self.eval_dir, "maps"), exist_ok=True)
             plt.imsave(os.path.join(self.eval_dir, "maps", "occmap_with_candidates_{}.png".format(self.frame_idx)), vis_map)
@@ -1340,7 +1340,7 @@ class AstarPlanner:
         # log the topk candidates
         self.previous_candidates = poses
         # print("Poses: ", poses.shape, "Scores: ", scores.shape)
-        return poses, scores, random_gaussian_params
+        return poses, scores, random_gaussian_params, candidate_obj_pos
     
     def generate_random_gaussians(self, candidate_pos):
         """ Generate Random Gaussians from candidate positions """
@@ -1470,7 +1470,7 @@ class AstarPlanner:
                               expansion: float = 1,
                               mode: str = "random",             # "random" (default) | "sorted"
                               theta_step_deg: float = 15.0,      # passo angolare per "sorted"
-                              radial_bins: int = 5,              # # anelli per "sorted"
+                              radial_bins: int = 6,              # # anelli per "sorted"
                               radial_spacing: str = "linear"     # "linear" | "sqrt_area"
                               ):
         """ 

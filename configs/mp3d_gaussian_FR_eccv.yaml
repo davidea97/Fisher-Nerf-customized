@@ -1,6 +1,6 @@
 
 workdir: experiments/GaussianSLAM
-run_name: obj_act_map_test
+run_name: obj_act_map_fisherRF_test
 
 # planning parameters
 policy: 
@@ -116,5 +116,5 @@ explore:
 
 explore_object:
   sample_range: 2.5
-  min_range: 1.0
+  min_range: 1.4
   sample_view_num: 256

@@ -68,6 +68,7 @@ from scripts.evaluation import load_glb_pointcloud, load_ply_pointcloud, apply_t
 from scripts.eval_3d_reconstruction import accuracy_comp_ratio_from_pcl
 
 from utils.object_reconstruction_utils import mask_border_contact, estimate_object_center, object_center_error, object_size_ratio, reached
+from utils.dino_utils import DinoBank, to_numpy
 
 from test_utils import yaml_safe_load, yaml_safe_dump
 
@@ -625,12 +626,21 @@ class NavTester(object):
             os.makedirs(os.path.join(self.policy_eval_dir, "camera_poses"), exist_ok=True)
 
          # === Load DINOv2 ===   
-        # if self.dino_extraction:
-        #     from scripts.dino_extract import DINOExtract, extract_dino_features, dino_image_visualization
-
-        #     dino_export="../third_party/dino_models/dinov2_vitl14_pretrain.pth"
-        #     dino_extractor = DINOExtract(dino_export, feature_layer=1)
-        #     print("DINOv2 model loaded")
+        if self.dino_extraction:
+            from scripts.dino_extract import DINOExtract, extract_dino_features, dino_image_visualization
+            self.dino_bank = DinoBank(
+                max_frames=20,              # come volevi
+                max_points_per_frame=2000,  # evita memoria eccessiva
+                tau_pool_add=0.7,
+                tau_cham_add=0.7,
+                tau_match_add=0.50,
+                seed=0
+            )
+            self.last_map_frame = -10**9
+            self.COOLDOWN = 5
+            dino_export="../third_party/dino_models/dinov2_vitl14_pretrain.pth"
+            dino_extractor = DINOExtract(dino_export, feature_layer=1)
+            print("DINOv2 model loaded")
         
         print("Max steps: ", self.options.max_steps)
         try: 
@@ -699,7 +709,8 @@ class NavTester(object):
                     
                 # Store all the camera poses
                 saved_camera_poses.append(camera_pose.copy())
-
+                if self.save_data:
+                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb/rgb_{t}.png"), rgb_bgr)
                 # Detect object in the scene
                 if self.dynamic_scene_rec:
                     image_shape = rgb_bgr.shape[:2]
@@ -727,21 +738,39 @@ class NavTester(object):
                         rgb_bgr_converted = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
                         self.store_filtered_obj_pointcloud(rgb_bgr_converted, depth_raw, intrinsics, object_mask_bw, camera_pose, object_pose, step=t)
                         self.evaluate_3d_object_reconstruction(step=t)
+                        do_mapping_this_frame=True
+                        if self.dino_extraction:
+                            dino_descriptors, selected_coord = extract_dino_features(rgb_bgr, object_mask_bw, dino_extractor)
+                            if dino_descriptors.shape[0] == 0:
+                                print("DINO descriptors are empty!")
+                            else:
+                                D_t = to_numpy(dino_descriptors).astype(np.float32, copy=False)
 
-                    # if self.dino_extraction:
-                    #     dino_descriptors, selected_coord = extract_dino_features(rgb_bgr, object_mask_bw, dino_extractor)
-                    #     if dino_descriptors.shape[0] == 0:
-                    #         print("DINO descriptors are empty!")
-                    #     else:
-                    #         all_dino_descriptors.append(dino_descriptors)
-                    #         all_images.append(rgb_bgr)
-                    #         all_selected_coord.append(selected_coord)
-                    #         print("Dino descriptors shape: ", dino_descriptors.shape)
+                                # metriche di similarità contro TUTTI i keyframe salvati
+                                sim_pool_max, sim_ch, frac_fwd, frac_bwd = self.dino_bank.similarity_metrics(D_t)
+                                print(f"[DINO] maxPool={sim_pool_max:.3f}  chamfer={sim_ch:.3f}  "
+                                    f"fwd>0.8={frac_fwd:.2f}  bwd>0.8={frac_bwd:.2f}  bank={len(self.dino_bank)}")
+
+                                # decisione mapping (percettiva) – puoi combinarla con baseline/parallasse/EIG
+                                very_similar = (sim_pool_max > 0.95) and (sim_ch > 0.82) and (min(frac_fwd, frac_bwd) > 0.60)
+                                cooldown_ok = (t - self.last_map_frame) >= self.COOLDOWN
+                                do_mapping_this_frame = (not very_similar) and cooldown_ok
+
+                                if do_mapping_this_frame:
+                                    # ... la tua fase di mapping ...
+                                    self.last_map_frame = t
+
+                                # aggiorna il bank SOLO se la vista è *distintiva* (come volevi)
+                                added = self.dino_bank.add_if_distinct(D_t, force=False)
+                                all_dino_descriptors.append(dino_descriptors)
+                                all_images.append(rgb_bgr)
+                                all_selected_coord.append(selected_coord)
+                                print("Dino descriptors shape: ", dino_descriptors.shape)
 
                 # Save current rgb, depth, semantic, camera pose
                 if self.save_data:
                     # save_path = os.path.join(self.policy_eval_dir, f"pointcloud/pcl_{t}.ply")
-                    cv2.imwrite(os.path.join(self.policy_eval_dir, f"rgb/rgb_{t}.png"), rgb_bgr)
+                    
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"depth_vis/depth_{t}.png"), depth_vis)
                     cv2.imwrite(os.path.join(self.policy_eval_dir, f"semantic/semantic_{t}.png"), semantic_vis)
                     # np.save(os.path.join(self.policy_eval_dir, f"depth/depth_map_{t}.npy"), depth_raw)
@@ -822,9 +851,9 @@ class NavTester(object):
                             save_path = os.path.join(slam.save_dir, "point_cloud/iteration_step_{}".format(slam.cur_frame_idx))
                             self.policy.save(save_path)
                         
-                            bev_render_pkg = self.policy.render_bev(slam)
-                            bev_render = bev_render_pkg['render'].cpu().numpy().transpose(1, 2, 0)  # Convert to HWC format if necessary
-                            bev_render = (bev_render.clip(0., 1.) * 255).astype(np.uint8).copy()
+                            # bev_render_pkg = self.policy.render_bev(slam)
+                            # bev_render = bev_render_pkg['render'].cpu().numpy().transpose(1, 2, 0)  # Convert to HWC format if necessary
+                            # bev_render = (bev_render.clip(0., 1.) * 255).astype(np.uint8).copy()
                             # cv2.imwrite(os.path.join(self.policy_eval_dir, f"bev_{slam.cur_frame_idx}.png"), bev_render)
                             # if self.save_data:
                             #     plt.imsave(os.path.join(self.policy_eval_dir, f"bev_{slam.cur_frame_idx}.png"), bev_render)
@@ -1031,17 +1060,8 @@ class NavTester(object):
 
                         # self.init_object_slam_done = True
 
-                    # obj_2d_img = mask_border_contact(object_mask_bw)
-                    # print("Border contact:", obj_2d_img) 
-                    
-                    # temp_obj_pcd, temp_obj_pts, temp_obj_W_pts = self.store_filtered_obj_pointcloud(rgb_bgr, depth_raw, intrinsics, object_mask_bw, c2w, object_pose, step=t)
-                    # self.evaluate_3d_object_reconstruction(step=t)
-                    
-                    
-                    # print("POINTS object: ", temp_obj_W_pts)
-                    # temp_obj_center = estimate_object_center(temp_obj_W_pts)
-                    # print("Estimated object center: ", temp_obj_center)
-                    ate_obj = obj_slam.track_rgbd(img, depth, w2c_t, action_id, obj_mask_t)
+                    if do_mapping_this_frame:
+                        ate_obj = obj_slam.track_rgbd(img, depth, w2c_t, action_id, obj_mask_t)
 
                     if ate_obj is not None:
                         self.log({"ate_obj": ate_obj}, t)
@@ -1731,12 +1751,12 @@ class NavTester(object):
         pose_proposal_fn = None if not hasattr(obj_slam, "pose_proposal") else getattr(obj_slam, "pose_proposal")
         print("Start global planning for object")
         if criteria.lower() == "fisher":
-            global_points, EIGs, random_gaussian_params = \
+            global_points, EIGs, random_gaussian_params, candidate_object_pose = \
                 self.policy.global_object_planning(obj_slam.pose_eval, gaussian_points, gaussian_points_scene, pose_proposal_fn, \
                                             expansion=expansion, visualize=True, \
                                             agent_pose=current_agent_pos)
         else:
-            global_points, EIGs, random_gaussian_params = \
+            global_points, EIGs, random_gaussian_params, candidate_object_pose = \
                 self.policy.global_object_planning(obj_slam.pose_eval_popgs, gaussian_points, gaussian_points_scene, pose_proposal_fn, \
                                             expansion=expansion, visualize=True, \
                                             agent_pose=current_agent_pos, criterion=criteria)
@@ -1771,11 +1791,12 @@ class NavTester(object):
         gs_pts_cnt = obj_slam.gs_pts_cnt(random_gaussian_params)
 
         # plan actions for each global goal
-        valid_global_pose, path_actions, paths_arr = self.action_planning_object(global_points, current_agent_pose, slam.gaussian_points, t)
+        valid_global_pose, path_actions, paths_arr = self.action_planning_object_adv(global_points, current_agent_pose, slam.gaussian_points, t)
         logger.info(f"Evaluate path actions: {len(path_actions)}")
 
         if criteria.lower() == "fisher":
             best_path, best_map_path, best_goal, best_world_path, best_global_path = self.path_evaluation(valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train, random_gaussian_params, obj_slam)
+            # best_path, best_map_path, best_goal, best_world_path, best_global_path = self.path_object_evaluation(valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train, random_gaussian_params, candidate_object_pose, obj_slam)
         else:
             best_path, best_map_path, best_goal, best_world_path, best_global_path = self.path_evaluation_popgs(valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train, random_gaussian_params, obj_slam, criterion=criteria)
 
@@ -1907,6 +1928,137 @@ class NavTester(object):
 
                 curr_action.append(action)
             
+                total_path_EIG += self.cfg.path_pose_weight * pose_EIG.item()
+                # iterative cumulation
+                if (len(curr_action) + 1) % self.cfg.acc_H_train_every == 0:
+                    total_path_EIG += self.cfg.path_point_weight * point_EIG.item()
+                    H_train_path = H_train_path + cur_H
+
+                if action == 1:
+                    map_coord = future_pose[[0, 2], 3]
+                    world_path.append(map_coord)
+                    map_coord = self.policy.convert_to_map(map_coord)
+                    map_path.append(map_coord)
+
+            if self.cfg.object_path_end_weight > 0:
+                # total_path_EIG = total_path_EIG / len(curr_action) + self.cfg.object_path_end_weight * final_EIG
+                total_path_EIG = total_path_EIG + self.cfg.object_path_end_weight * final_EIG
+            else:
+                total_path_EIG = (total_path_EIG + final_EIG) / len(curr_action)
+            
+            total_path_EIGs.append(total_path_EIG)
+
+            # select the best one
+            if total_path_EIG > best_path_EIG:
+                best_path_EIG = total_path_EIG
+                best_path = curr_action
+                best_goal = pose_np
+                best_global_path = paths
+                best_map_path = map_path
+                best_world_path = world_path
+
+        return best_path, best_map_path, best_goal, best_world_path, best_global_path
+
+    def path_object_evaluation(self, valid_global_pose, path_actions, paths_arr, EIGs, current_agent_pose, H_train, random_gaussian_params, candidate_object_pose, obj_slam: GaussianObjectSLAM):
+        
+        total_path_EIGs = []
+        
+        best_global_path = None
+        best_path_EIG = -1.
+        best_path = None
+        best_goal = None
+        best_map_path = None
+        best_world_path = None
+        valid_path = 0
+
+        probe_every = 5
+        max_queue = 200
+
+        gs_pts_cnt = obj_slam.gs_pts_cnt(random_gaussian_params)
+
+        def yaw_of_pose(T):
+            return np.arctan2(T[0, 2], T[2, 2])
+
+        def angle_wrap(a):
+            return np.arctan2(np.sin(a), np.cos(a))
+        
+        for pose_np, path_action, paths, final_EIG in tqdm(zip(valid_global_pose, path_actions, paths_arr, EIGs), desc="Evaluate Paths"):
+            # check cluster manager  
+            if cm.should_exit():
+                cm.requeue()
+
+            if valid_path > 20:
+                break
+            
+            valid_path += 1
+           
+            # set to cam height
+            future_pose = current_agent_pose.copy()
+            future_pose[1, 3] = self.policy.cam_height
+
+            # Set the object candidate pose
+            # temp_object_pose = np.array([candidate_object_pose[0], future_pose[1, 3], candidate_object_pose[1], 1.0])
+
+            obj_np = candidate_object_pose.detach().cpu().numpy().reshape(-1)  # -> array([x, z])
+            temp_object_pose = np.array([obj_np[0], future_pose[1, 3], obj_np[1], 1.0], dtype=np.float32)
+            
+            H_train_path = H_train.clone()
+            total_path_EIG = 0
+            map_path = []
+            world_path = []
+            curr_action = []
+
+            steps_since_probe = 0
+
+            def eval_info_at_pose(future_pose_4x4):
+                future_w2c = np.linalg.inv(future_pose_4x4)
+                cur_H, pose_H, vis_count = obj_slam.compute_Hessian(
+                    future_w2c,
+                    random_gaussian_params=random_gaussian_params,
+                    return_pose=True,
+                    return_points=True
+                )
+                H_inv = torch.reciprocal(H_train_path + self.cfg.H_reg_lambda)
+                if self.cfg.vol_weighted_H:
+                    if vis_count == 0:
+                        point_EIG = torch.tensor(0.0)
+                    else:
+                        point_EIG = torch.log(torch.sum(cur_H * H_inv / gs_pts_cnt))
+                else:
+                    point_EIG = torch.tensor(0.0) if vis_count == 0 else torch.log(torch.sum(cur_H * H_inv))
+
+                pose_EIG = torch.log(torch.linalg.det(pose_H))
+                return point_EIG, pose_EIG, cur_H, vis_count
+            
+            for action in path_action:
+
+                future_pose = compute_next_campos(future_pose, action, self.slam_config["forward_step_size"], self.slam_config["turn_angle"])
+                curr_action.append(action)
+                
+                # Evaluate info gain at the new pose
+                point_EIG, pose_EIG, cur_H, vis_count = eval_info_at_pose(future_pose)
+                if vis_count == 0:
+                    steps_since_probe += 1
+
+                # Every N steps test small rotations to observe the object, if a rotation improves the info gain, take it
+                if steps_since_probe >= probe_every and len(curr_action) < max_queue:
+                    steps_since_probe = 0
+                    
+                    # yaw_now  = yaw_of_pose(future_pose)
+                    while abs(ang_wp) > abs(np.radians(self.slam_config["turn_angle"])) and len(curr_action) < max_queue:
+                        rel_wp = np.linalg.inv(future_pose) @ temp_object_pose
+                        ang_wp = np.arctan2(rel_wp[0], rel_wp[2])
+                        if ang_wp >  np.radians(self.slam_config["turn_angle"]):
+                            act = 3  # turn right
+                        elif ang_wp < -np.radians(self.slam_config["turn_angle"]):
+                            act = 2  # turn left
+                        else:
+                            break
+                        
+                        future_pose = compute_next_campos(future_pose, act, self.slam_config["forward_step_size"], self.slam_config["turn_angle"])
+
+                    point_EIG, pose_EIG, cur_H, _ = eval_info_at_pose(future_pose)
+
                 total_path_EIG += self.cfg.path_pose_weight * pose_EIG.item()
                 # iterative cumulation
                 if (len(curr_action) + 1) % self.cfg.acc_H_train_every == 0:
@@ -2162,6 +2314,172 @@ class NavTester(object):
                 valid_global_points.append(pose_np)
                 paths_arr.append(paths)
         
+        return valid_global_points, path_actions, paths_arr
+
+    def action_planning_object_adv(self, global_points, current_agent_pose, gaussian_points, t):
+        """
+        Plan sequences of actions for each goal pose.
+
+        Args:
+            global_points (np.array): (N, 4, 4) goal poses
+            current_agent_pose (np.array): (4, 4) current agent pose
+            gaussian_points: Gaussian Points from MonoGS
+            t: time step
+
+        Return:
+            valid_global_points (List[np.array]): valid goal poses
+            path_actions: List[List[int]]: actions for each goal
+            paths_arr: List[np.ndarray]: grid waypoints for each goal
+        """
+        # ---------- Tunable tolerances ----------
+        step = self.slam_config["forward_step_size"]
+        turn_deg = self.slam_config["turn_angle"]
+        turn = np.radians(turn_deg)
+
+        # if we're this close to the final position, switch to orientation-only
+        POS_TOL_FINAL = 2.5 * step
+        # yaw tolerance to consider “aligned enough”
+        YAW_TOL_FINAL = turn
+        # if a waypoint is this close to the final goal, skip it
+        SKIP_WP_IF_NEAR_GOAL = 2.0 * step
+        # if the next waypoint does not reduce distance-to-goal by this margin, skip it
+        SKIP_WP_MARGIN = 0.25 * step
+        # safety cap if we run long
+        SAFETY_CAP = 200
+
+        def yaw_of_pose(T):
+            return np.arctan2(T[0, 2], T[2, 2])
+
+        def angle_wrap(a):
+            return np.arctan2(np.sin(a), np.cos(a))
+
+        def world_from_grid_cell_center(cell_zy):
+            w = self.policy.convert_to_world(cell_zy + 0.5)  # (x,z)
+            return np.array([w[0], future_pose[1, 3], w[1], 1.0])
+
+        valid_global_points, path_actions, paths_arr = [], [], []
+
+        # set start position in A* Planner
+        start = self.policy.convert_to_map(current_agent_pose[[0, 2], 3])[[1, 0]]  # z,x
+        self.policy.setup_start(start, gaussian_points, t)
+
+        for pose_np in tqdm(global_points, desc="Action Planning"):
+            if cm.should_exit():
+                cm.requeue()
+
+            # build A* path on the grid to goal position (ignore goal height here)
+            goal_pos = pose_np[:3, 3].copy()
+            goal_pos[1] = current_agent_pose[1, 3]
+            finish = self.policy.convert_to_map(goal_pos[[0, 2]])[[1, 0]]  # z,x
+
+            path_grid = self.policy.planning(finish)  # (M,2) in z,x
+            if len(path_grid) == 0:
+                continue
+
+            # If only one cell returned, add finish to ensure at least one move is possible
+            if len(path_grid) == 1:
+                # path_grid = np.concatenate([path_grid, finish[None, :]], axis=0)
+                if len(path_grid) == 1:
+                    if not np.array_equal(path_grid[0], finish):
+                        path_grid = np.concatenate([path_grid, finish[None, :]], axis=0)
+                    else:
+                        path_grid = np.concatenate([path_grid, path_grid[0][None, :]], axis=0)
+
+            # ---------- prune waypoints that are "too near" the final goal ----------
+            pruned = []
+            goal_world_4 = np.array([pose_np[0, 3], current_agent_pose[1, 3], pose_np[2, 3], 1.0])
+            for p in path_grid:
+                wpt_world_4 = np.array([*self.policy.convert_to_world(p + 0.5), current_agent_pose[1, 3], 1.0])  # x,z,y,1
+                d_goal = np.linalg.norm((wpt_world_4[[0, 2]] - goal_world_4[[0, 2]]))
+                if d_goal > SKIP_WP_IF_NEAR_GOAL:
+                    pruned.append(p)
+            if len(pruned) == 0:
+                pruned = [path_grid[0], path_grid[-1]]  # keep at least start/end
+            path_grid = np.array(pruned, dtype=np.int32)
+            if path_grid.shape[0] < 2:
+                path_grid = np.vstack([path_grid, finish[None, :]])
+
+            # ---------- simulate actions ----------
+            future_pose = current_agent_pose.copy()
+            future_pose[1, 3] = self.policy.cam_height
+            stage_idx = 1
+            stage_goal = path_grid[stage_idx]
+            stage_goal_w4 = world_from_grid_cell_center(stage_goal)
+
+            acts = []
+            used_steps = 0
+
+            while used_steps < SAFETY_CAP: # and len(acts) < self.slam_config["policy"]["planning_queue_size"]:
+                # distance to final goal in camera frame
+                final_goal_w4 = np.array([pose_np[0, 3], future_pose[1, 3], pose_np[2, 3], 1.0])
+                rel_final = np.linalg.inv(future_pose) @ final_goal_w4
+                d_final = np.linalg.norm(rel_final[[0, 2]])
+                yaw_now = yaw_of_pose(future_pose)
+                yaw_goal = yaw_of_pose(pose_np)
+                dyaw = angle_wrap(yaw_goal - yaw_now)
+
+                # ---------- early-stop if "good enough" ----------
+                if (d_final < POS_TOL_FINAL) and (abs(dyaw) <= YAW_TOL_FINAL):
+                    break
+
+                # ---------- orientation-only mode near final ----------
+                if d_final < POS_TOL_FINAL:
+                    act = 2 if dyaw > 0 else 3
+                    # if within one turn step, done
+                    if abs(dyaw) <= YAW_TOL_FINAL:
+                        break
+                    future_pose = compute_next_campos(future_pose, act, step, turn_deg)
+                    acts.append(act)
+                    used_steps += 1
+                    continue
+
+                # ---------- otherwise: move along waypoints ----------
+                # if close enough to current stage waypoint, advance
+                rel_wp = np.linalg.inv(future_pose) @ stage_goal_w4
+                d_wp = np.linalg.norm(rel_wp[[0, 2]])
+                if d_wp < step:
+                    # try to skip to the last waypoint if the next is almost redundant
+                    if stage_idx + 1 < len(path_grid):
+                        next_wp = path_grid[stage_idx + 1]
+                        next_wp_w4 = world_from_grid_cell_center(next_wp)
+                        rel_next = np.linalg.inv(future_pose) @ next_wp_w4
+                        rel_goal = np.linalg.inv(future_pose) @ final_goal_w4
+                        # if next waypoint is not improving the approach enough → skip
+                        if (np.linalg.norm(rel_goal[[0, 2]]) - np.linalg.norm(rel_next[[0, 2]])) < SKIP_WP_MARGIN:
+                            # skip directly to goal (position)
+                            stage_goal_w4 = final_goal_w4
+                            stage_idx = len(path_grid) - 1
+                        else:
+                            stage_idx += 1
+                            stage_goal = path_grid[stage_idx]
+                            stage_goal_w4 = world_from_grid_cell_center(stage_goal)
+                    else:
+                        # last waypoint reached → switch to final goal
+                        stage_goal_w4 = final_goal_w4
+
+                    continue  # re-evaluate with updated stage_goal_w4
+
+                # Compute steering to current stage waypoint
+                rel_wp = np.linalg.inv(future_pose) @ stage_goal_w4
+                ang_wp = np.arctan2(rel_wp[0], rel_wp[2])
+
+                # yaw priority when significantly misaligned
+                if ang_wp >  turn:
+                    act = 3  # turn right
+                elif ang_wp < -turn:
+                    act = 2  # turn left
+                else:
+                    act = 1  # forward
+
+                future_pose = compute_next_campos(future_pose, act, step, turn_deg)
+                acts.append(act)
+                used_steps += 1
+
+            if acts not in path_actions:
+                path_actions.append(acts)
+                valid_global_points.append(pose_np)
+                paths_arr.append(path_grid)
+
         return valid_global_points, path_actions, paths_arr
 
     def action_planning_object(self, global_points, current_agent_pose, gaussian_points, t):
