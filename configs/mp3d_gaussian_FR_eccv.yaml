@@ -1,6 +1,6 @@
 
-workdir: experiments/GaussianSLAM
-run_name: obj_act_map_fisherRF_test
+workdir: experiments/GaussianActiveMapping
+run_name: fisherRF_OA_test
 
 # planning parameters
 policy: 
@@ -59,7 +59,7 @@ mapping:
     means3D: 0.001
     rgb_colors: 0.0025
     unnorm_rotations: 0.001
-  num_iters: 60
+  num_iters: 120 # 60
   prune_gaussians: true
   pruning_dict:
     # Remove gaussians with opacity below this threshold

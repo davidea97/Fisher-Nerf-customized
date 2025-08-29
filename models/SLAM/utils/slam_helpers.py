@@ -1,9 +1,12 @@
 import torch
 import torch.nn.functional as F
-from models.SLAM.utils.slam_external import build_rotation, calc_ssim
+from models.SLAM.utils.slam_external import build_rotation, calc_ssim, calc_ssim_masked, masked_l1_depth, masked_l1_rgb
 
 def l1_loss_v1(x, y):
     return torch.abs((x - y)).mean()
+
+def l1_loss_v1_masked(x, y, mask):
+    return (torch.abs((x - y))[mask]).mean()
 
 
 def l1_loss_v2(x, y):
@@ -37,6 +40,39 @@ def calc_loss(curr_data,
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+
+    return losses
+
+def calc_loss_mask(curr_data, im, depth, mask, color_mask, use_l1, use_sil_for_loss, ignore_outlier_depth_loss, tracking):
+    losses = {}
+
+    # Depth (è già mascherata tramite `mask` che passi qui)
+    if use_l1:
+        if tracking:
+            losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
+        else:
+            losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
+
+    # -------------------- RGB --------------------
+    if tracking:
+        # com'era già
+        if (use_sil_for_loss or ignore_outlier_depth_loss):
+            losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
+        else:
+            losses['im'] = torch.abs(curr_data['im'] - im).sum()
+    else:
+        # >>>>>>>>>>>>>> CAMBIO QUI: fotometria MASCHERATA <<<<<<<<<<<<<<
+        # usa solo i pixel nella maschera (3,H,W) bool
+        # losses['im'] = 0.8 * l1_loss_v1_masked(im, curr_data['im'], color_mask)# + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+        # rgb_err = torch.abs(curr_data['im'] - im)[color_mask]
+        # losses['im'] = rgb_err.mean()
+        # (opzionale: se vuoi mantenere un pizzico di SSIM, puoi aggiungere:)
+        m = color_mask.float()
+        im_m  = im * m
+        gt_m  = curr_data['im'] * m
+        # losses['im'] = 0.8 * rgb_err.mean() + 0.2 * (1.0 - calc_ssim(im_m, gt_m))
+        losses['im'] = 0.8 * l1_loss_v1_masked(im, curr_data['im'], color_mask) + 0.2 * (1.0 - calc_ssim(im_m, gt_m))
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     return losses
 

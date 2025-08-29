@@ -1161,10 +1161,11 @@ class AstarPlanner:
             expansion (int): expansion factor (increase when no best path is found)
             visualize:  
         """
+
         # build frontiers
         print(">> Global Object Planning")
         
-        candidate_pos, free_space = self.build_frontiers(gaussian_points_scene)
+        _, free_space = self.build_frontiers(gaussian_points_scene)
         candidate_obj_pos = self.build_object_frontiers(gaussian_points)
         use_frontier = candidate_obj_pos is not None
 
@@ -1178,6 +1179,8 @@ class AstarPlanner:
         else:
             random_gaussian_params = None
 
+        random_gaussian_params=None
+        
         # propose goals when no frontiers exist
         if candidate_obj_pos is None and goal_proposal_fn is not None:
             # propose goals

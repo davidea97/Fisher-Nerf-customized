@@ -119,6 +119,79 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     else:
         return ssim_map.mean(1).mean(1).mean(1)
 
+def masked_l1_rgb(x, y, color_mask):
+    """
+    x,y: (3,H,W)
+    color_mask: (3,H,W) con 0/1 (float o bool)
+    """
+    if color_mask.dtype != torch.float32 and color_mask.dtype != torch.float64:
+        color_mask = color_mask.float()
+    den = color_mask.sum().clamp_min(1)
+    return (torch.abs(x - y) * color_mask).sum() / den
+
+
+def masked_l1_depth(dpred, dgt, mask):
+    """
+    dpred,dgt: (1,H,W)
+    mask: (1,H,W) con 0/1 (float o bool)
+    """
+    if mask.dtype != torch.float32 and mask.dtype != torch.float64:
+        mask = mask.float()
+    den = mask.sum().clamp_min(1)
+    return (torch.abs(dpred - dgt) * mask).sum() / den
+
+
+def calc_ssim_masked(img1, img2, mask, window_size=11):
+    """
+    img1,img2: (3,H,W)
+    mask: (1,H,W) o (H,W) con 0/1 (float o bool)
+    Ritorna: SSIM medio pesato dalla maschera (scalare)
+    Usa la stessa logica della tua calc_ssim/_ssim, ma senza mediare su tutta l’immagine.
+    """
+    # porta a (1,C,H,W)
+    if img1.ndim == 3:
+        img1 = img1.unsqueeze(0)
+        img2 = img2.unsqueeze(0)
+
+    # porta la mask a (1,1,H,W)
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0).unsqueeze(0)
+    elif mask.ndim == 3:
+        if mask.shape[0] != 1:
+            mask = mask.unsqueeze(0)     # (1,1,H,W) se era (1,H,W)
+        else:
+            mask = mask.unsqueeze(0)     # (1,1,H,W)
+
+    mask = mask.float()
+    channel = img1.size(1)
+    window = create_window(window_size, channel).type_as(img1)
+    if img1.is_cuda:
+        window = window.cuda(img1.get_device())
+
+    # === copia della tua _ssim per ottenere la MAPPA ===
+    mu1 = func.conv2d(img1, window, padding=window_size // 2, groups=channel)
+    mu2 = func.conv2d(img2, window, padding=window_size // 2, groups=channel)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = func.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = func.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12  = func.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
+
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+
+    ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / \
+               ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))   # (1,C,H,W)
+
+    # media sui canali → (1,1,H,W)
+    ssim_map = ssim_map.mean(dim=1, keepdim=True)
+
+    den = mask.sum().clamp_min(1)
+    return (ssim_map * mask).sum() / den
+
 
 def accumulate_mean2d_gradient(variables):
     variables['means2D_gradient_accum'][variables['seen']] += torch.norm(
@@ -193,7 +266,83 @@ def inverse_sigmoid(x):
     return torch.log(x / (1 - x))
 
 
-def prune_gaussians(params, variables, optimizer, iter, prune_dict, scene_bound=None):
+import torch.nn.functional as F
+def get_gaussians_outside_mask(params, curr_data, obj_mask_2d):
+    """
+    Conta gaussiane dentro/fuori maschera nella vista corrente e stampa
+    anche il range delle scale (max asse) per dentro/fuori.
+
+    Ritorna:
+      outside_mask: (N,) bool
+      stats: dict con conteggi e range scale
+    """
+    device = params['means3D'].device
+    obj_mask_2d = obj_mask_2d.to(device).bool()
+
+    # --- Camera pose corrente (w2c) dal frame corrente ---
+    time_idx = curr_data['id']
+    cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx])
+    cam_tran = params['cam_trans'][..., time_idx]
+    w2c = torch.eye(4, device=device, dtype=torch.float32)
+    w2c[:3, :3] = build_rotation(cam_rot)
+    w2c[:3, 3]  = cam_tran
+
+    # --- Trasformazione & proiezione ---
+    means3D   = params['means3D']                            # (N,3)
+    means_cam = (w2c[:3, :3] @ means3D.T + w2c[:3, 3:4]).T   # (N,3)
+    z         = means_cam[:, 2]
+
+    K = curr_data['intrinsics'].to(device)                   # (3,3)
+    pts_cam_h = torch.cat([means_cam, torch.ones_like(z[:, None])], dim=1)  # (N,4) se serve
+    # Proiezione pinhole (senza distorsione)
+    pts2d_h = (K @ means_cam.T).T                            # (N,3)
+    u = pts2d_h[:, 0] / (pts2d_h[:, 2].clamp_min(1e-6))
+    v = pts2d_h[:, 1] / (pts2d_h[:, 2].clamp_min(1e-6))
+
+    H, W = obj_mask_2d.shape[-2], obj_mask_2d.shape[-1]
+    in_img = (z > 0) & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+
+    iu = u[in_img].round().long().clamp(0, W - 1)
+    iv = v[in_img].round().long().clamp(0, H - 1)
+
+    inside_mask_img = torch.zeros(means3D.shape[0], dtype=torch.bool, device=device)
+    inside_mask_img[in_img] = obj_mask_2d[iv, iu]  # True se proietta dentro la maschera
+
+    outside_mask = ~inside_mask_img  # tutto ciò che non cade in maschera (incluse fuori immagine o dietro camera)
+
+    # --- Statistiche scale (max asse) ---
+    # log_scales: (N,3) -> scale_max: (N,)
+    scale_max = torch.exp(params['log_scales']).max(dim=1).values
+
+    idx_in  = torch.nonzero(inside_mask_img, as_tuple=False).squeeze(1)
+    idx_out = torch.nonzero(outside_mask,    as_tuple=False).squeeze(1)
+
+    def rng(x):
+        if x.numel() == 0:
+            return (float('nan'), float('nan'))
+        return (x.min().item(), x.max().item())
+
+    in_min,  in_max  = rng(scale_max[idx_in])   # range scale per gaussiane DENTRO maschera
+    out_min, out_max = rng(scale_max[idx_out])  # range scale per gaussiane FUORI maschera
+
+    # --- Stampe utili ---
+    # print(f"Gaussians  IN  mask: {idx_in.numel()} / {means3D.shape[0]}  | scale_max range: [{in_min:.5f}, {in_max:.5f}]")
+    # print(f"Gaussians OUT mask: {idx_out.numel()} / {means3D.shape[0]}  | scale_max range: [{out_min:.5f}, {out_max:.5f}]")
+
+    stats = {
+        'in_count':  int(idx_in.numel()),
+        'out_count': int(idx_out.numel()),
+        'total':     int(means3D.shape[0]),
+        'inside_scale_min':  in_min,
+        'inside_scale_max':  in_max,
+        'outside_scale_min': out_min,
+        'outside_scale_max': out_max,
+        'idx_in':  idx_in,
+        'idx_out': idx_out
+    }
+    return outside_mask, stats
+
+def prune_gaussians(params, variables, optimizer, iter, prune_dict, scene_bound=None, curr_data=None, obj_mask_2d=None):
     if iter <= prune_dict['stop_after']:
         if (iter >= prune_dict['start_after']) and (iter % prune_dict['prune_every'] == 0):
             if iter == prune_dict['stop_after']:
@@ -212,19 +361,50 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict, scene_bound=
             #         torch.any(params['means3D'] < lower_bound - 0.05, dim=1),
             #         torch.any(params['means3D'] > upper_bound + 0.05, dim=1)
             #     ))
-            
+
+
+            # ADDED OBJECT AWARE MASK PRUNING
+            if obj_mask_2d is not None:
+                active_alpha_thresh = prune_dict.get('outside_opacity_thresh', 0.01)
+                alpha = torch.sigmoid(params['logit_opacities']).squeeze(-1)
+                active = (alpha >= active_alpha_thresh)
+
+                # conta/rileva fuori maschera nella vista corrente
+                outside_mask, stats = get_gaussians_outside_mask(params, curr_data, obj_mask_2d)
+                outside_active = outside_mask & active
+                print(f"Outside Mask before pruning: {stats['out_count']}")
+                # (opzionale) limita anche per scale troppo grandi
+                if 'outside_max_scale' in prune_dict:
+                    scale_max = torch.exp(params['log_scales']).max(dim=1).values
+                    outside_active = outside_active & (scale_max >= prune_dict['outside_max_scale'])
+
+                num_out = int(outside_active.sum().item())
+                if num_out > 0:
+                    # debug utile
+                    scale_max = torch.exp(params['log_scales']).max(dim=1).values
+                    rm_min = float(scale_max[outside_active].min().item())
+                    rm_max = float(scale_max[outside_active].max().item())
+                    print(f"[Prune] outside-mask: removing {num_out} | scale_max in [{rm_min:.5f}, {rm_max:.5f}]")
+
+                to_remove = torch.logical_or(to_remove, outside_active)
+
             # Remove Gaussians that are too big
             if iter >= prune_dict['remove_big_after']:
                 big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1
                 to_remove = torch.logical_or(to_remove, big_points_ws)
             params, variables = remove_points(to_remove, params, variables, optimizer)
             torch.cuda.empty_cache()
-        
         # Reset Opacities for all Gaussians
         if iter > 0 and iter % prune_dict['reset_opacities_every'] == 0 and prune_dict['reset_opacities']:
             new_params = {'logit_opacities': inverse_sigmoid(torch.ones_like(params['logit_opacities']) * 0.01)}
             params = update_params_and_optimizer(new_params, params, optimizer)
-    
+        
+        
+        # DAVIDE
+        if obj_mask_2d is not None:
+            outside_mask, stats = get_gaussians_outside_mask(params, curr_data, obj_mask_2d)
+            print(f"Outside Mask after pruning: {stats['out_count']}")
+            
     return params, variables
 
 

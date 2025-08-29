@@ -1061,7 +1061,12 @@ class NavTester(object):
                         # self.init_object_slam_done = True
 
                     if do_mapping_this_frame:
-                        ate_obj = obj_slam.track_rgbd(img, depth, w2c_t, action_id, obj_mask_t)
+                        ate_obj = obj_slam.track_rgbd(img, depth, w2c_t, action_id, obj_mask_t, step=t)
+                    
+                    # Rendering the object
+                    # os.makedirs(os.path.join(self.policy_eval_dir, "rendering_object"), exist_ok=True)
+                    # image=obj_slam.render_at_pose(c2w_t)
+                    # plt.imsave(os.path.join(self.policy_eval_dir, "rendering_object", f"render_mask_{t}.png"), image["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
 
                     if ate_obj is not None:
                         self.log({"ate_obj": ate_obj}, t)
@@ -1222,13 +1227,9 @@ class NavTester(object):
         else:
             acc = comp = ratio = fpr = 0.0
             iratio = 1.0
-        print(f"ACC (dist): {acc*100:.2f} cm, Completeness (dist): {comp*100:.2f} cm, Completeness (ratio): {ratio*100:.2f} %, FPR: {(1-iratio)*100:.2f} %")
-        # with open(os.path.join(self.policy_eval_dir, f"{self.policy_name}_results.txt"), "a") as f:
-        #     f.write(f"Object Evaluation:\n"
-        #             f"ACC (dist): {acc*100:.2f} cm, "
-        #             f"Completeness (dist): {comp*100:.2f} cm, "
-        #             f"Completeness (ratio): {ratio*100:.2f} %, "
-        #             f"FPR: {(1-iratio)*100:.2f} %\n")
+        print(f"[eval] step={step} | ACC={acc*100:.2f} cm | COMP={comp*100:.2f} cm | "
+          f"Completeness={ratio*100:.2f}% | FPR={fpr*100:.2f}%")
+
         metrics_dir = os.path.join(self.policy_eval_dir, "metrics")
         yaml_path   = os.path.join(metrics_dir, "object_recon_metrics.yaml")
         from datetime import datetime
@@ -1258,23 +1259,35 @@ class NavTester(object):
             }
 
         data["steps"].append(new_row)
-        # tieni ordinati per step (nel caso scrivi fuori ordine)
         data["steps"] = sorted(data["steps"], key=lambda r: r["step"])
+        # ---- AUC (trapezi) aggiornata ad ogni chiamata ----
+        xs = np.array([r["step"] for r in data["steps"]], dtype=float)
+        ys = np.array([r["completeness_ratio"] for r in data["steps"]], dtype=float)  # percentuale (0..100)
+
+        # opzionale: padding fino a max_steps con plateau dell’ultimo valore
+        max_steps = int(data["settings"].get("max_steps", 0))
+        if max_steps and len(xs) > 0 and xs[-1] < max_steps:
+            xs = np.append(xs, float(max_steps))
+            ys = np.append(ys, ys[-2] if len(ys) >= 2 and xs[-2] == max_steps else ys[-2] if len(ys) >= 2 and xs[-2] > xs[-3] else ys[-2] if len(ys) >= 2 else ys[-1])
+            # più semplicemente (plateau con ultimo valore):
+            ys[-1] = ys[-2] if len(ys) >= 2 else ys[-1]
+
+        # AUC grezza (%·step)
+        auc_raw = float(np.trapz(ys, xs)) if len(xs) >= 2 else 0.0
+        # AUC normalizzata in [0,1]
+        denom = (max_steps * 100.0) if max_steps else ((xs[-1] - xs[0]) * 100.0 if len(xs) >= 2 else 1.0)
+        auc_norm = float(auc_raw / denom) if denom > 0 else 0.0
+
+        # salva nel summary (snapshot corrente) e, se vuoi, anche cumulativa per step corrente
+        data["summary"]["auc_completeness_percent_vs_steps_raw"] = auc_raw
+        data["summary"]["auc_completeness_normalized_0_1"] = auc_norm
+        data["summary"]["last_step"] = int(data["steps"][-1]["step"])
+        data["summary"]["last_completeness_percent"] = float(data["steps"][-1]["completeness_ratio"])
+
+        # (facoltativo) annota l’AUC cumulativa fino allo step corrente dentro la riga
+        new_row["auc_until_now_normalized"] = auc_norm
         yaml_safe_dump(data, yaml_path)
 
-        # (facoltativo) CSV semplice
-        # try:
-        #     import csv
-        #     csv_path = os.path.join(metrics_dir, "object_recon_metrics.csv")
-        #     os.makedirs(metrics_dir, exist_ok=True)
-        #     write_header = not os.path.exists(csv_path)
-        #     with open(csv_path, "a", newline="") as f:
-        #         w = csv.DictWriter(f, fieldnames=list(new_row.keys()))
-        #         if write_header:
-        #             w.writeheader()
-        #         w.writerow(new_row)
-        # except Exception as e:
-        #     print("[warn] CSV dump failed:", e)
 
     def evaluate_3d_reconstruction(self):
         gt_3d_reconstruction = load_glb_pointcloud(os.path.join(self.options.root_path, self.options.dataset, self.options.scenes_list[0], self.options.scenes_list[0] + ".glb"))
@@ -1917,12 +1930,14 @@ class NavTester(object):
                         point_EIG = torch.tensor(0.)
                     else:
                         point_EIG = torch.log(torch.sum(cur_H * H_train_inv_path / gs_pts_cnt))
+                    point_EIG = torch.tensor(0.) 
                 else:
                     # If no visible points, set point_EIG to 0 or set a penalty
                     if vis_count==0:
                         point_EIG = torch.tensor(0.) 
                     else:
                         point_EIG = torch.log(torch.sum(cur_H * H_train_inv_path))
+                    point_EIG = torch.tensor(0.) 
                 
                 pose_EIG = torch.log(torch.linalg.det(pose_H))
 
@@ -2475,7 +2490,7 @@ class NavTester(object):
                 acts.append(act)
                 used_steps += 1
 
-            if acts not in path_actions:
+            if acts not in path_actions and len(acts) > 0:
                 path_actions.append(acts)
                 valid_global_points.append(pose_np)
                 paths_arr.append(path_grid)

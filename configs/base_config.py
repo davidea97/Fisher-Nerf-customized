@@ -45,7 +45,7 @@ cfg.checkpoint_interval = 40
 cfg.keyframe_every = 4
 cfg.keyframe_obj_every = 2
 cfg.map_every = 10
-cfg.map_obj_every = 1
+cfg.map_obj_every = 2
 cfg.downsample_pcd = 1
 cfg.mapping_window_size = 32
 

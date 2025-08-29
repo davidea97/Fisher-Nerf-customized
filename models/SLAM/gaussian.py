@@ -401,6 +401,9 @@ def add_new_gaussians(config, params, variables, curr_data, sil_thres,
         for k, v in new_params.items():
             params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
         
+        # Print scales of the new gaussians:
+        print(f"Add {new_pt_cld.shape[0]} new gaussians, scales range: {mean3_sq_dist.min().item():.4f} - {mean3_sq_dist.max().item():.4f}")
+
         num_pts = params['means3D'].shape[0]
         variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
         variables['denom'] = torch.zeros(num_pts, device="cuda").float()
@@ -715,6 +718,7 @@ class GaussianSLAM:
                 # Print the selected keyframes
                 print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
+            os.makedirs(os.path.join(self.eval_dir, "rendering"), exist_ok=True)
             # Reset Optimizer & Learning Rates for Full Map Optimization
             optimizer = self.get_optimizer(tracking=False) 
             
@@ -751,6 +755,9 @@ class GaussianSLAM:
 
                 # Backprop
                 loss.backward()
+                image=self.render_at_pose(torch.linalg.inv(curr_gt_w2c))
+                plt.imsave(os.path.join(self.eval_dir, "rendering", f"after_optimization_{time_idx}.png"), image["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
+            
                 with torch.no_grad():
                     # Prune Gaussians
                     if self.config['mapping']['prune_gaussians']:
@@ -1351,16 +1358,14 @@ class GaussianSLAM:
 
         scores = []
         navigable_c2ws = []
-
+        
         for cam_id, c2w in enumerate(tqdm(poses, desc="Examing Hessains")):
             # compute cur H
             w2c = torch.linalg.inv(c2w)
             cur_H = self.compute_Hessian( w2c, return_points=True, random_gaussian_params=False)
 
-            self.render_at_pose(c2w, random_gaussian_params)
-            
             view_score = torch.sum(cur_H * H_train_inv).item() 
-            
+            # print(f"Pose {cam_id} Score: ", view_score)
             scores.append(view_score)
             navigable_c2ws.append(c2w)
         

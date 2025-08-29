@@ -92,8 +92,33 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, curr
             mask = (projected_pts[:, 0] < width-edge)*(projected_pts[:, 0] > edge) * \
                 (projected_pts[:, 1] < height-edge)*(projected_pts[:, 1] > edge)
             mask = mask & (points_z[:, 0] > 0)
+
+
+            # === NEW: object-mask check nel keyframe (se disponibile) ===
+            kf_mask = keyframe.get('obj_mask_2d', None)
+            if kf_mask is None:
+                kf_mask = keyframe.get('mask', None)   # compat con vecchia chiave
+            if kf_mask is not None:
+                kf_mask = kf_mask.bool()
+                # se la risoluzione differisce, adatta alla (height,width) corrente
+                if kf_mask.shape[-2:] != (height, width):
+                    kf_mask_resized = torch.nn.functional.interpolate(
+                        kf_mask[None, None].float(), size=(height, width), mode='nearest'
+                    )[0, 0].bool()
+                else:
+                    kf_mask_resized = kf_mask
+
+                # campiona la maschera ai pixel proiettati validi
+                u = projected_pts[:, 0].round().long().clamp(0, width - 1)
+                v = projected_pts[:, 1].round().long().clamp(0, height - 1)
+                in_obj = kf_mask_resized[v, u]  # True se cade nell'oggetto del keyframe
+                mask = mask & in_obj
+            # === END NEW ===
+
+            
             # Compute the percentage of points that are inside the image
             percent_inside = mask.sum()/projected_pts.shape[0]
+            # print(f"Keyframe {keyframeid}: {percent_inside*100:.2f}% points inside the image")
             list_keyframe.append(
                 {'id': keyframeid, 'percent_inside': percent_inside})
 

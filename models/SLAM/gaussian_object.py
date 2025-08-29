@@ -19,9 +19,9 @@ from models.SLAM.utils.eval_helpers import report_loss, report_progress, eval
 from models.SLAM.utils.keyframe_selection import keyframe_selection_overlap
 from models.SLAM.utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
-    transform_to_frame, l1_loss_v1, matrix_to_quaternion, calc_loss
+    transform_to_frame, l1_loss_v1, matrix_to_quaternion, calc_loss, calc_loss_mask
 )
-from models.SLAM.utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify, compute_next_campos, remove_points
+from models.SLAM.utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify, compute_next_campos, remove_points, get_gaussians_outside_mask
 import datasets.util.map_utils as map_utils
 import habitat_sim
 import cv2
@@ -232,7 +232,6 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     if tracking and use_sil_for_loss:
         mask = mask & presence_sil_mask
 
-
     # Consider object mask if available
     obj_mask_2d = curr_data.get('obj_mask_2d', None)
     if obj_mask_2d is not None:
@@ -248,13 +247,33 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         mask = mask & obj_mask_2d.unsqueeze(0)              # (1,H,W)
         presence_sil_mask = presence_sil_mask & obj_mask_2d # (H,W)
 
-
     color_mask = torch.tile(mask, (3, 1, 1))
     color_mask = color_mask.detach()
 
-    losses = calc_loss(curr_data, im, depth, mask, color_mask, 
-                        use_l1, use_sil_for_loss, ignore_outlier_depth_loss, tracking)
+    if mapping:
+        losses = calc_loss_mask(curr_data, im, depth, mask, color_mask, 
+                            use_l1, use_sil_for_loss, ignore_outlier_depth_loss, tracking)
+    else:
+        losses = calc_loss(curr_data, im, depth, mask, color_mask, 
+                            use_l1, use_sil_for_loss, ignore_outlier_depth_loss, tracking)
 
+    # losses = calc_loss(curr_data, im, depth, mask, color_mask, 
+    #                         use_l1, use_sil_for_loss, ignore_outlier_depth_loss, tracking)
+    
+    if obj_mask_2d is not None:
+        bg_mask1 = (~obj_mask_2d).unsqueeze(0)                # (1,H,W)
+        bg_mask3 = torch.tile(bg_mask1, (3,1,1)).float()      # (3,H,W)
+
+        lambda_bg_rgb   = 0.1    # prova 0.05–0.2
+        lambda_bg_alpha = 0.1    # prova 0.05–0.2
+
+        L_bg_rgb   = (torch.abs(im) * bg_mask3).sum() / bg_mask3.sum().clamp_min(1)
+        # 'silhouette' è in [0,1], già fuori-maschera vogliamo zero
+        L_bg_alpha = (silhouette.clamp(min=0, max=1) * bg_mask1).sum() / bg_mask1.sum().clamp_min(1)
+
+        # somma alle tue perte RGB (senza cambiare chiavi del dict)
+        losses['im'] = losses['im'] + lambda_bg_rgb * L_bg_rgb + lambda_bg_alpha * L_bg_alpha
+    
     # Visualize the Diff Images
     
     if tracking and visualize_tracking_loss and (tracking_iteration + 1) % 10 == 0:
@@ -336,6 +355,78 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, isotropic=False):
             params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
 
     return params
+
+def count_gaussians_vs_mask(params, w2c, intrinsics, obj_mask_2d,
+                            opacity_thresh=0.01):
+    """
+    Conta quante gaussiane 'attive' (per opacità) proiettano dentro/fuori maschera
+    nella vista definita da w2c+intrinsics.
+
+    params: dict con almeno 'means3D' (N,3), 'logit_opacities' (N,1)
+    w2c: (4,4) torch
+    intrinsics: tuple/list (fx, fy, cx, cy)
+    obj_mask_2d: (H,W) bool/byte/float
+    opacity_thresh: soglia su sigmoid(logit_opacities)
+    """
+    if obj_mask_2d is None:
+        return {'in': 0, 'out': params['means3D'].shape[0], 'active': 0,
+                'idx_in': torch.empty(0, dtype=torch.long),
+                'idx_out': torch.arange(params['means3D'].shape[0])}
+
+    cx = intrinsics[0][2]
+    cy = intrinsics[1][2]
+    fx = intrinsics[0][0]
+    fy = intrinsics[1][1]
+
+    H, W = obj_mask_2d.shape[-2], obj_mask_2d.shape[-1]
+    device = params['means3D'].device
+    obj_mask_2d = obj_mask_2d.to(device).bool()
+
+    # 1) Attive per opacità
+    alpha = torch.sigmoid(params['logit_opacities']).squeeze(-1)  # (N,)
+    active = alpha >= opacity_thresh
+    if active.ndim == 0:  # caso edge N=1
+        active = active.unsqueeze(0)
+
+    # 2) Trasforma in camera
+    Xw = params['means3D'][active]                      # (Na,3)
+    if Xw.numel() == 0:
+        return {'in': 0, 'out': 0, 'active': 0,
+                'idx_in': torch.empty(0, dtype=torch.long, device=device),
+                'idx_out': torch.empty(0, dtype=torch.long, device=device)}
+
+    Xc = (w2c[:3,:3] @ Xw.T + w2c[:3,3:4]).T           # (Na,3)
+    z  = Xc[:, 2]
+    vis = z > 0                                         # davanti alla camera
+
+    # 3) Proiezione pinhole
+    u = fx * (Xc[:,0] / z.clamp_min(1e-6)) + cx
+    v = fy * (Xc[:,1] / z.clamp_min(1e-6)) + cy
+
+    in_img = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    ok = vis & in_img
+
+    # 4) Sample maschera (nearest)
+    iu = u[ok].round().long().clamp(0, W-1)
+    iv = v[ok].round().long().clamp(0, H-1)
+    in_mask_ok = obj_mask_2d[iv, iu]                    # bool su ok
+
+    # Indici globali (rispetto a tutte le gaussiane)
+    idx_active = torch.nonzero(active, as_tuple=False).squeeze(1)  # (Na,)
+    idx_ok     = idx_active[ok]
+    idx_in     = idx_ok[in_mask_ok]
+    # quelle visibili ma fuori maschera
+    idx_out_vis = idx_ok[~in_mask_ok]
+    # quelle attive ma NON visibili in questa vista: le contiamo come 'out' (nessun contributo utile)
+    idx_not_ok  = idx_active[~ok]
+    idx_out = torch.cat([idx_out_vis, idx_not_ok], dim=0)
+
+    return {'in': idx_in.numel(),
+            'out': idx_out.numel(),
+            'active': active.sum().item(),
+            'idx_in': idx_in,
+            'idx_out': idx_out}
+    
 
 def add_new_gaussians(config, params, variables, curr_data, sil_thres, 
                     time_idx, mean_sq_dist_method, densify_dict, 
@@ -430,7 +521,9 @@ def add_new_gaussians(config, params, variables, curr_data, sil_thres,
         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, isotropic=config["isotropic"])
         for k, v in new_params.items():
             params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
-        
+        # Print scales of the new gaussians:
+        print(f"Add {new_pt_cld.shape[0]} new gaussians, scales range: {mean3_sq_dist.min().item():.4f} - {mean3_sq_dist.max().item():.4f}")
+
         num_pts = params['means3D'].shape[0]
         variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
         variables['denom'] = torch.zeros(num_pts, device="cuda").float()
@@ -483,6 +576,7 @@ class GaussianObjectSLAM:
         self.scene_radius_depth_ratio = 1.
 
         self.gt_w2c_all_frames = []
+        self.object_mask_all_frames = []
         self.keyframe_list = []
         self.keyframe_time_indices = []
 
@@ -618,7 +712,7 @@ class GaussianObjectSLAM:
         return {"render": im, "depth": depth}
 
 
-    def track_rgbd(self, color, depth, gt_w2c = None, action = None, obj_mask_2d=None):
+    def track_rgbd(self, color, depth, gt_w2c = None, action = None, obj_mask_2d=None, step=0):
         if not self.initialize:
             pose = torch.eye(4) if gt_w2c is None else gt_w2c
             self.init(color, depth, pose)
@@ -638,6 +732,7 @@ class GaussianObjectSLAM:
         gt_c2w = torch.linalg.inv(gt_w2c)
         curr_gt_w2c = gt_w2c if gt_w2c is not None else None # Place Holder here
         self.gt_w2c_all_frames.append(curr_gt_w2c)
+        self.object_mask_all_frames.append(obj_mask_2d)
         iter_time_idx = time_idx
         curr_data = {'cam': self.cam, 
                      'im': color, 
@@ -737,8 +832,12 @@ class GaussianObjectSLAM:
                                                       self.config['mapping']['sil_thres'], time_idx,
                                                       self.config['mean_sq_dist_method'], self.config['mapping']['densify_dict'],
                                                       add_rand_gaussians=self.config.mapping.add_rand_gaussians, downsample_pcd=self.config["downsample_pcd"])
-                                                      
+                
                 post_num_pts = self.params['means3D'].shape[0]
+                print("Number of Gaussians after Densification: ", post_num_pts)
+                _, stats = get_gaussians_outside_mask(self.params, curr_data, obj_mask_2d)
+                print(f"Gaussians  IN  mask: {stats['in_count']} / {stats['total']}  | scale_max range: [{stats['inside_scale_min']:.5f}, {stats['inside_scale_max']:.5f}] | scale_out range: [{stats['outside_scale_min']:.5f}, {stats['outside_scale_max']:.5f}]")
+                
                 if self.config['use_wandb']:
                     wandb_run.log({"Mapping/Number of Gaussians": post_num_pts,
                                    "Mapping/step": wandb_time_step})
@@ -762,9 +861,17 @@ class GaussianObjectSLAM:
                 selected_time_idx.append(time_idx)
                 selected_keyframes.append(-1)
                 # Print the selected keyframes
-                # print(f"\nSelected Keyframes at Frame {time_idx-1+self.cur_frame}: {[x - 1 + self.cur_frame for x in selected_time_idx]}")
+                print(f"\nSelected Keyframes at Frame {time_idx-1+self.cur_frame}: {[x - 1 + self.cur_frame for x in selected_time_idx]}")
                 # print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
+            os.makedirs(os.path.join(self.eval_dir, "rendering_object"), exist_ok=True)
+            # image=self.render_at_pose(torch.linalg.inv(curr_gt_w2c))
+            # plt.imsave(os.path.join(self.eval_dir, "rendering_object", f"after_adding_gauss_{time_idx-1+self.cur_frame}.png"), image["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
+            # stats_before = count_gaussians_vs_mask(self.params, self.first_frame_w2c,
+            #                            self.intrinsics, obj_mask_2d,
+            #                            opacity_thresh=0.01)
+            # print(f"[Before mapping] active={stats_before['active']} in={stats_before['in']} out={stats_before['out']}")
+            
             # self.cur_frame += 1 # DAVIDE UPDATE
             # Reset Optimizer & Learning Rates for Full Map Optimization
             optimizer = self.get_optimizer(tracking=False) 
@@ -786,15 +893,18 @@ class GaussianObjectSLAM:
                     iter_time_idx = time_idx
                     iter_color = color
                     iter_depth = depth
+                    iter_mask = obj_mask_2d
                 else:
                     # Use Keyframe Data
                     iter_time_idx = self.keyframe_list[selected_rand_keyframe_idx]['id']
                     iter_color = self.keyframe_list[selected_rand_keyframe_idx]['color']
                     iter_depth = self.keyframe_list[selected_rand_keyframe_idx]['depth']
+                    iter_mask = self.keyframe_list[selected_rand_keyframe_idx]['obj_mask_2d']
                 
                 iter_gt_w2c = self.gt_w2c_all_frames[:iter_time_idx+1]
+                # iter_mask = self.object_mask_all_frames[:iter_time_idx+1]
                 iter_data = {'cam': self.cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                             'intrinsics': self.intrinsics, 'w2c': self.first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
+                             'intrinsics': self.intrinsics, 'w2c': self.first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c, 'obj_mask_2d': iter_mask}
                 # Loss for current frame
                 loss, variables, losses = get_loss(self.params, iter_data, self.variables, iter_time_idx, self.config['mapping']['loss_weights'],
                                                 self.config['mapping']['use_sil_for_loss'], self.config['mapping']['sil_thres'],
@@ -802,11 +912,13 @@ class GaussianObjectSLAM:
 
                 # Backprop
                 loss.backward()
+                
                 with torch.no_grad():
                     # Prune Gaussians
                     if self.config['mapping']['prune_gaussians']:
+                        # self.params, self.variables = prune_gaussians(self.params, self.variables, optimizer, it, self.config['mapping']['pruning_dict'], curr_data=iter_data, obj_mask_2d=iter_mask)
                         self.params, self.variables = prune_gaussians(self.params, self.variables, optimizer, it, self.config['mapping']['pruning_dict'])
-                        
+
                         if self.config['use_wandb']:
                             wandb_run.log({"Mapping/Number of Gaussians - Pruning": self.params['means3D'].shape[0],
                                            "Mapping/step": wandb_mapping_step})
@@ -833,6 +945,38 @@ class GaussianObjectSLAM:
                     else:
                         progress_bar.update(1)
             
+            outside_mask, stats = get_gaussians_outside_mask(self.params, curr_data, obj_mask_2d)
+            print(f"Gaussians  IN  mask: {stats['in_count']} / {stats['total']}  | scale_max range: [{stats['inside_scale_min']:.5f}, {stats['inside_scale_max']:.5f}] | scale_out range: [{stats['outside_scale_min']:.5f}, {stats['outside_scale_max']:.5f}]")
+           
+            inside_mask = ~outside_mask
+            image=self.render_at_pose(torch.linalg.inv(curr_gt_w2c), mask=inside_mask)
+            plt.imsave(os.path.join(self.eval_dir, "rendering_object", f"after_optimization_{step}.png"), image["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
+            # === save PLY of gaussians INSIDE mask (world space) ===
+            # inside_idx = torch.nonzero(inside_mask, as_tuple=False).squeeze(1)
+
+            # # xyz = self.params['means3D'][inside_idx].detach()
+            # xyz = self.params['means3D'].detach()
+            # # prova a recuperare un colore per-gaussiana
+            # if 'colors' in self.params:
+            #     rgb = self.params['colors'][inside_idx].detach().clamp(0, 1)
+            # elif 'rgb' in self.params:
+            #     rgb = self.params['rgb'][inside_idx].detach().clamp(0, 1)
+            # elif 'shs' in self.params:
+            #     # usa il coefficiente DC degli SH (sigmoid per portarlo in [0,1])
+            #     rgb = torch.sigmoid(self.params['shs'][inside_idx, 0, :]).detach().clamp(0, 1)
+            # else:
+            #     rgb = torch.full_like(xyz, 0.8)  # grigio di fallback
+
+            # point_cld = torch.cat([xyz, rgb], dim=1)  # (N,6) xyz+rgb
+            # ply_path = os.path.join(self.eval_dir, "rendering_object",
+            #                         f"gaussians_inside_{time_idx-1+self.cur_frame}.ply")
+            # ok = save_pointcloud_o3d(ply_path, point_cld, binary=True)
+            # print(f"[PLY] saved {ply_path}: {ok}  (N={point_cld.shape[0]})")
+            # stats_after = count_gaussians_vs_mask(self.params, self.first_frame_w2c,
+            #                           self.intrinsics, obj_mask_2d,
+            #                           opacity_thresh=0.01)
+            # print(f"[After mapping]  active={stats_after['active']} in={stats_after['in']} out={stats_after['out']}")
+
             if num_iters_mapping > 0:
                 progress_bar.close()
 
@@ -872,7 +1016,7 @@ class GaussianObjectSLAM:
                                  'est_w2c': curr_w2c, 
                                  'color': color, 
                                  'depth': depth,
-                                 'mask': kf_mask  # 1,H,W bool
+                                 'obj_mask_2d': kf_mask  # 1,H,W bool
                                  }
                 if self.config.tracking.with_droid:
                     curr_keyframe['droid_depth'] = droid_depth
@@ -901,7 +1045,10 @@ class GaussianObjectSLAM:
             self.save(time_idx)
 
         self.frame_idx += 1
-
+        # os.makedirs(os.path.join(self.eval_dir, "rendering_object"), exist_ok=True)
+        # image=self.render_at_pose(torch.linalg.inv(curr_gt_w2c))
+        # plt.imsave(os.path.join(self.eval_dir, "rendering_object", f"render_mask_{time_idx-1+self.cur_frame}.png"), image["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
+                  
     @torch.no_grad()
     def get_top_down_map(self, depth, c2w):
         # update current robot location on occ_map
@@ -1448,6 +1595,7 @@ class GaussianObjectSLAM:
 
         scores = []
         navigable_c2ws = []
+        os.makedirs(os.path.join(self.eval_dir, "rendering_object"), exist_ok=True)
 
         for cam_id, c2w in enumerate(tqdm(poses, desc="Examing Hessains")):
             # compute cur H
@@ -1455,12 +1603,11 @@ class GaussianObjectSLAM:
             # cur_H = self.compute_Hessian( w2c, return_points=True, random_gaussian_params=False)
             cur_H = self.compute_Hessian( w2c, return_points=True, random_gaussian_params=random_gaussian_params)
 
-            t=self.render_at_pose(c2w, random_gaussian_params)
-            # plt.imsave("./experiments/debug_render-mask.png", t["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
+            # t=self.render_at_pose(c2w)
+            # plt.imsave(os.path.join(self.eval_dir, "rendering_object", f"render_mask_{cam_id}.png"), t["render"].permute(1, 2, 0).cpu().numpy().clip(0., 1.))
 
-            
             view_score = torch.sum(cur_H * H_train_inv).item() # Aggregated score for the view
-            
+            # print(f"View {cam_id} score: {view_score}")
             scores.append(view_score)
             navigable_c2ws.append(c2w)
         
